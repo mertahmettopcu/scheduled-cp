@@ -1,9 +1,9 @@
 name: Daily Crypto Pipeline
- on:
+on:
   schedule:
     - cron: "0 9 * * *"   # runs daily at 09:00 UTC (12:00 Turkey time) - adjust if needed
   workflow_dispatch:
- jobs:
+jobs:
   run-pipeline:
     runs-on: ubuntu-latest
     steps:
