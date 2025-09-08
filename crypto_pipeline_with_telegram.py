@@ -4,21 +4,21 @@
  Requirements: set environment variables SUPABASE_URL, SUPABASE_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
  Run: python crypto_pipeline_with_telegram.py
  """
- import os
- import time
- import requests
- import pandas as pd
- from datetime import datetime, timedelta
- from supabase import create_client, Client
- # -------------------------- Config (via environment variables) --------------------------
+import os
+import time
+import requests
+import pandas as pd
+from datetime import datetime, timedelta
+from supabase import create_client, Client
+# -------------------------- Config (via environment variables) --------------------------
 SUPABASE_URL = os.getenv("SUPABASE_URL")
- SUPABASE_KEY = os.getenv("SUPABASE_KEY")  # Service role key recommended for insert/upsert
- BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
- CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
- if not (SUPABASE_URL and SUPABASE_KEY):
-    raise SystemExit("Missing SUPABASE_URL or SUPABASE_KEY env vars. See guide.")
- supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
- # -------------------------- Helpers -----------------------------------------------------
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")  # Service role key recommended for insert/upsert
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+if not (SUPABASE_URL and SUPABASE_KEY):
+   raise SystemExit("Missing SUPABASE_URL or SUPABASE_KEY env vars. See guide.")
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+# -------------------------- Helpers -----------------------------------------------------
 def send_telegram_alert(message: str):
     if not (BOT_TOKEN and CHAT_ID):
         print("Telegram not configured; skipping alert.")
