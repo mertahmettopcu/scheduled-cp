@@ -162,5 +162,5 @@ def run_pipeline(days=250):
         print("Supabase response:", getattr(resp, "status_code", None), resp)
     except Exception as e:
         print("Supabase upload failed:", e)
- if __name__ == "__main__":
+if __name__ == "__main__":
     run_pipeline()
