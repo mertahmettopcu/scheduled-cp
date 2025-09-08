@@ -42,7 +42,7 @@ def get_top_30():
     return [item["symbol"].upper() for item in data]
  # -------------------------- Binance hourly kline fetch with pagination -----------------
 BINANCE_KLINES_URL = "https://api.binance.com/api/v3/klines"
- def fetch_hourly_klines(pair: str, start_ts_ms: int, end_ts_ms: int):
+def fetch_hourly_klines(pair: str, start_ts_ms: int, end_ts_ms: int):
     """Fetch hourly klines for pair between start_ts_ms and end_ts_ms (ms epoch).
     Binance allows max 1000 candles per request, so we paginate by moving startTime forward.
     Returns list of kline records (raw arrays).
@@ -92,7 +92,7 @@ def hourly_to_noon_daily_close(hourly_df: pd.DataFrame):
 def wma(series: pd.Series, window: int):
     weights = range(1, window + 1)
     return (series * weights).sum() / sum(weights)
- def classify_position(close, wma50, wma200):
+def classify_position(close, wma50, wma200):
     import math
     if wma50 is None or wma200 is None or (pd.isna(wma50) or pd.isna(wma200)):
         return "Not enough data"
@@ -120,7 +120,7 @@ def get_binance_noon_series(symbol: str, days: int = 250):
     df["close"] = df["close"].astype(float)
     daily = hourly_to_noon_daily_close(df)
     return daily
- def run_pipeline(days=250):
+def run_pipeline(days=250):
     symbols = get_top_30()
     print("Top symbols:", symbols)
     all_rows = []
