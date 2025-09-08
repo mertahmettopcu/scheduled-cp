@@ -56,7 +56,9 @@ def fetch_hourly_klines(pair: str, start_ts_ms: int, end_ts_ms: int):
         ms_range = end_ts_ms - curr
         hours_needed = int(ms_range / (3600 * 1000)) + 1
         limit = min(1000, hours_needed)
-        params = {"symbol": pair, "interval": "1h", "startTime": curr, "limit": limit}
+        #params = {"symbol": pair, "interval": "1h", "startTime": curr, "limit": limit}
+        params = {"symbol": pair, "interval": "1h", "limit": limit}
+
         try:
             r = requests.get(BINANCE_KLINES_URL, params=params, timeout=10)
             r.raise_for_status()
