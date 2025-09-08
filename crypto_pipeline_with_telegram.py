@@ -61,6 +61,8 @@ def fetch_hourly_klines(pair: str, start_ts_ms: int, end_ts_ms: int):
 
         try:
             r = requests.get(BINANCE_KLINES_URL, params=params, timeout=10)
+            print(f"Status Code: {r.status_code}") ##### you may remove this line ##########################################################
+            print(f"Raw response for {pair}: {r.text[:500]}") ##### you may remove this line ##########################################################
             r.raise_for_status()
             data = r.json()
             if not data:
