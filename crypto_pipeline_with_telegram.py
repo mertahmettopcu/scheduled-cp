@@ -34,7 +34,7 @@ def send_telegram_alert(message: str):
  # -------------------------- CoinGecko top 30 -------------------------------------------
 def get_top_30():
     url = "https://api.coingecko.com/api/v3/coins/markets"
-    params = {"vs_currency": "usd", "order": "market_cap_desc", "per_page": 30, "page": 1}
+    params = {"vs_currency": "usd", "order": "market_cap_desc", "per_page": 10, "page": 1}  ## cahnge per_page back to 30 later on
     resp = requests.get(url, params=params, timeout=15)
     resp.raise_for_status()
     data = resp.json()
