@@ -64,8 +64,10 @@ def fetch_hourly_klines(pair: str, start_ts_ms: int, end_ts_ms: int):
             r.raise_for_status()
             data = r.json()
             if not data:
+                print(f"No data for {pair}") ##### you may remove this line ##########################################################
                 break
             out.extend(data)
+            print(f"Fetched {len(data)} candels for {pair}") ##### you may remove this line ##########################################
             last_open = data[-1][0]  # open time ms of last candle returned
             curr = last_open + 3600 * 1000  # move to next hour after last_open
             time.sleep(0.12)  # be polite to Binance
