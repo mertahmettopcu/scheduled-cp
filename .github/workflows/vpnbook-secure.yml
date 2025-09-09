@@ -39,8 +39,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # Step 6: Run your script
+      # Step 6: Run Python script with Supabase secrets
       - name: Run Python script
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: python crypto_pipeline_with_telegram.py
 
       # Step 7: Disconnect VPN
