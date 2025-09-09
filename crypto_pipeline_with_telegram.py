@@ -306,8 +306,16 @@ def run_pipeline(days=250):
 
     # Upsert into Supabase (ensure unique index on (coin, date))
     try:
+        dedup = {}
+        for r in all_rows:
+          key = (r["coin"], r["date"])
+          dedup[key] = r  # last one wins
+
+        all_rows = list(dedup.values())
+
         print(f"Upserting {len(all_rows)} rows to Supabase...")
-        resp = supabase.table("coin_wma").upsert(all_rows).execute()
+        resp = supabase.table("coin_wma").upsert(all_rows,on_conflict="coin,date", returning="minimal").execute()
+
         # supabase-py v2 returns an object with .data; print a light summary
         data_len = len(resp.data) if getattr(resp, "data", None) else None
         print(f"Supabase upsert OK. Rows echoed: {data_len}")
