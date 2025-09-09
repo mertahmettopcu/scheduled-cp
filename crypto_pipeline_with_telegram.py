@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 crypto_pipeline_with_telegram.py
-- Fetch top 30 coins from CoinGecko
+- Ensure a must-have coin list is attempted first
+- Fetch extra coins from CoinGecko to fill to 30 total
 - Download hourly klines from Binance, pick candle closest to 12:00 Europe/Istanbul each day
 - Compute WMA(50) and WMA(200)
 - Classify position and previous_position
@@ -45,11 +46,11 @@ def send_telegram_alert(message: str):
     except Exception as e:
         print("Failed to send Telegram message:", e)
 
-# -------------------------- CoinGecko top N --------------------------------------------
-def get_top_symbols_for_headroom(limit: int = 100) -> list[str]:
+# -------------------------- CoinGecko --------------------------------------------
+def get_top_symbols_for_headroom(limit: int = 200) -> list[str]:
     """
-    Ask CoinGecko for many (100) coins to have slack, then we can keep the first 30 that
-    actually trade against USDT on Binance.
+    Ask CoinGecko for many coins (default 200) to have slack,
+    then we keep the first 30 Binance-valid after must-haves.
     """
     url = "https://api.coingecko.com/api/v3/coins/markets"
     params = {"vs_currency": "usd", "order": "market_cap_desc", "per_page": limit, "page": 1}
@@ -186,8 +187,8 @@ def to_native_types(rows: list[dict]) -> list[dict]:
 def get_binance_noon_series(symbol: str, days: int = 250):
     end_ts = int(datetime.now(timezone.utc).timestamp() * 1000)
     start_ts = end_ts - int((days + 10) * 24 * 3600 * 1000)
-
     pair = f"{symbol}USDT"
+
     raw = fetch_hourly_klines(pair, start_ts, end_ts)
     if not raw:
         return None
@@ -203,14 +204,41 @@ def get_binance_noon_series(symbol: str, days: int = 250):
     return hourly_to_noon_daily_close(df)
 
 def run_pipeline(days=250):
-    bases = get_top_symbols_for_headroom(limit=100)
-    print("Top symbols from CoinGecko (first 100):", bases[:20], "...")
-    pairs_all = map_to_valid_pair(bases, "USDT")
+    # --------- 1) Must-have bases (normalized) ----------
+    must_have_raw = [
+        "BTC","ETH","XRP","BNB","SOL","DOGE","TRX","ADA",
+        "HYPE","XLM","SUI","LINK","BCH","HBAR","AVAX","TON",
+        "LTC","1000 SHIB","DOT","UNIS"
+    ]
 
-    # Keep exactly the first 30 valid pairs
+    # Normalize known variants to Binance-style bases
+    normalize = {
+        "1000 SHIB": "SHIB",
+        "1000SHIB": "SHIB",
+        "UNIS": "UNI",
+    }
+    must_have = [normalize.get(sym.upper().replace(" ", ""), sym.upper().replace(" ", "")) for sym in must_have_raw]
+    # Note: "HYPE" may not exist on Binance; we will log it if missing.
+
+    # --------- 2) Add extra bases from CoinGecko to fill to 30 ----------
+    bases_extra = get_top_symbols_for_headroom(limit=200)
+    # Keep order: must-haves first, then extras not already in must-have
+    all_bases = must_have + [b for b in bases_extra if b not in must_have]
+
+    # --------- 3) Map to Binance tradable USDT pairs ----------
+    pairs_all = map_to_valid_pair(all_bases, "USDT")
+
+    # Log any must-haves that did not make it to Binance pairs (unsupported or self-quote)
+    listed_pairs_set = set(pairs_all)
+    missing_must = [b for b in must_have if f"{b}USDT" not in listed_pairs_set]
+    if missing_must:
+        print("Must-have symbols NOT available on Binance (skipped):", missing_must)
+
+    # Keep exactly the first 30 tradable pairs
     pairs = pairs_all[:30]
-    print(f"Tradable Binance pairs (showing up to 30): {pairs}")
+    print(f"Tradable Binance pairs (up to 30, must-haves first): {pairs}")
 
+    # --------- 4) Process & upsert ----------
     all_rows = []
 
     for pair in pairs:
@@ -252,6 +280,7 @@ def run_pipeline(days=250):
             rows = to_native_types(out.to_dict(orient="records"))
             all_rows.extend(rows)
 
+            # Alerts
             if len(daily) >= 2:
                 latest = daily.iloc[-1]
                 previous = daily.iloc[-2]
