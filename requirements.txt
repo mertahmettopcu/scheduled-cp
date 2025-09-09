@@ -4,3 +4,6 @@ supabase
 python-dotenv
 streamlit
 pytz
+numpy
+python-binance
+python-telegram-bot
