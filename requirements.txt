@@ -2,7 +2,7 @@ requests
 pandas
 supabase
 python-dotenv
-streamlit
+streamlit>=1.36
 pytz
 numpy
 python-binance
