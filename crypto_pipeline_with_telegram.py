@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
 """
 crypto_pipeline_with_telegram.py
+
 - Ensure a must-have coin list is attempted first
 - Fetch extra coins from CoinGecko to fill to 30 total
-- Download hourly klines from Binance, pick candle closest to 12:00 Europe/Istanbul each day
-- Compute WMA(50) and WMA(200)
+- Use Binance 1-minute klines to capture the EXACT 12:00 Europe/Istanbul close per day
+- Compute WMA(50) and WMA(200) with strict windows
 - Classify position and previous_position
-- Upsert into Supabase (coin_wma table)
+- Upsert into Supabase (coin_wma table) with (coin,date) conflict target
 - Send Telegram alerts on position change (latest vs previous)
 
 Env:
   SUPABASE_URL, SUPABASE_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+
+Run:
+  python crypto_pipeline_with_telegram.py
 """
 
 import os
@@ -86,61 +90,81 @@ def map_to_valid_pair(bases: list[str], quote: str = "USDT") -> list[str]:
             print(f"Skipping unsupported pair: {sym}")
     return out
 
-def fetch_hourly_klines(pair: str, start_ts_ms: int, end_ts_ms: int):
+def fetch_minute_klines_exact(pair: str, start_ms: int, limit: int = 1):
     """
-    Fetch hourly klines for pair between start_ts_ms and end_ts_ms (ms epoch).
-    Binance allows max 1000 candles per request; we paginate using startTime.
+    Fetch 1-minute klines starting at start_ms (UTC ms).
+    With limit=1, Binance returns the candle whose open >= start_ms.
+    We validate the exact open_time (== start_ms) afterwards.
     """
-    out = []
-    curr = start_ts_ms
-    max_iters = 200
-    it = 0
-    backoff = 0.25
+    params = {
+        "symbol": pair,
+        "interval": "1m",
+        "startTime": start_ms,
+        "limit": limit,
+    }
+    r = requests.get(BINANCE_KLINES_URL, params=params, timeout=15)
+    r.raise_for_status()
+    return r.json()
 
-    while curr < end_ts_ms and it < max_iters:
-        hours_needed = int((end_ts_ms - curr) / (3600 * 1000)) + 1
-        limit = min(1000, max(hours_needed, 1))
-        params = {
-            "symbol": pair,
-            "interval": "1h",
-            "startTime": curr,
-            "endTime": end_ts_ms,
-            "limit": limit,
-        }
+# -------------------------- Time alignment ---------------------------------------------
+def get_binance_noon_series(symbol: str, days: int = 250):
+    """
+    Build a daily series using the exact 12:00 (Europe/Istanbul) close for each day
+    by fetching the 1-minute kline that starts at exactly that minute.
+    Returns DataFrame with columns ['date','close'] sorted ascending by date.
+    """
+    pair = f"{symbol}USDT"
+
+    # Build the set of local dates we want (unique, sorted)
+    end_utc = pd.Timestamp.utcnow().tz_localize("UTC")
+    dates_local = [(end_utc - pd.Timedelta(d, "D")).tz_convert("Europe/Istanbul").date()
+                   for d in range(days + 10)]  # +margin
+    dates_local = sorted(set(dates_local))
+
+    rows = []
+    for d in dates_local:
+        ts_local = pd.Timestamp(d, tz="Europe/Istanbul") + pd.Timedelta(hours=12)  # 12:00 local
+        ts_utc = ts_local.tz_convert("UTC")
+        start_ms = int(ts_utc.timestamp() * 1000)
+
         try:
-            r = requests.get(BINANCE_KLINES_URL, params=params, timeout=20)
-            if r.status_code == 429:
-                time.sleep(backoff)
-                backoff = min(backoff * 2, 4.0)
-                continue
-            r.raise_for_status()
-            data = r.json()
-            if not data:
-                break
-            out.extend(data)
-            last_open = data[-1][0]
-            if last_open <= curr:
-                break
-            curr = last_open + 3600 * 1000
-            time.sleep(0.12)
-        except Exception as e:
-            print(f"Error fetching klines for {pair}: {e}")
-            time.sleep(1)
-            break
-        it += 1
-    return out
+            # First try: request starting exactly at the minute
+            data = fetch_minute_klines_exact(pair, start_ms=start_ms, limit=1)
+            got_exact = False
+            if data:
+                open_ms = data[0][0]
+                if open_ms == start_ms:
+                    close_price = float(data[0][4])
+                    rows.append({"date": pd.to_datetime(d), "close": close_price})
+                    got_exact = True
 
-# -------------------------- Timezone & resampling ---------------------------------------
-def hourly_to_noon_daily_close(hourly_df: pd.DataFrame):
-    df = hourly_df.copy()
-    df["local_time"] = df["open_time"].dt.tz_convert("Europe/Istanbul")
-    df["local_date"] = df["local_time"].dt.date
-    df["hour_diff"] = (df["local_time"].dt.hour - 12).abs()
-    idx = df.groupby("local_date")["hour_diff"].idxmin()
-    daily = df.loc[idx].copy()
-    daily["date"] = pd.to_datetime(daily["local_date"])
-    daily = daily.sort_values("date").reset_index(drop=True)
-    return daily[["date", "close"]]
+            if not got_exact:
+                # Fallback: pull a tiny 3-minute window around target and scan for exact opening minute
+                window_start = start_ms - 60_000
+                data2 = fetch_minute_klines_exact(pair, start_ms=window_start, limit=3)
+                found = False
+                for k in data2 or []:
+                    if k[0] == start_ms:
+                        close_price = float(k[4])
+                        rows.append({"date": pd.to_datetime(d), "close": close_price})
+                        found = True
+                        break
+                if not found:
+                    print(f"[{pair}] Missing exact 12:00 local minute for {d}")
+            time.sleep(0.05)  # be gentle
+
+        except requests.HTTPError as e:
+            print(f"[{pair}] HTTP error for {d}: {e}")
+            time.sleep(0.2)
+        except Exception as e:
+            print(f"[{pair}] Error for {d}: {e}")
+            time.sleep(0.2)
+
+    if not rows:
+        return None
+
+    daily = pd.DataFrame(rows).dropna().sort_values("date").reset_index(drop=True)
+    return daily
 
 # -------------------------- Indicators & classification ---------------------------------
 def wma(series: pd.Series, window: int):
@@ -184,61 +208,41 @@ def to_native_types(rows: list[dict]) -> list[dict]:
     return out
 
 # -------------------------- Main pipeline -----------------------------------------------
-def get_binance_noon_series(symbol: str, days: int = 250):
-    end_ts = int(datetime.now(timezone.utc).timestamp() * 1000)
-    start_ts = end_ts - int((days + 10) * 24 * 3600 * 1000)
-    pair = f"{symbol}USDT"
-
-    raw = fetch_hourly_klines(pair, start_ts, end_ts)
-    if not raw:
-        return None
-
-    cols = [
-        "open_time","open","high","low","close","volume","close_time",
-        "qav","num_trades","taker_base","taker_quote","ignore"
-    ]
-    df = pd.DataFrame(raw, columns=cols)
-    df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
-    df["close"] = pd.to_numeric(df["close"], errors="coerce")
-    df = df.dropna(subset=["open_time", "close"])
-    return hourly_to_noon_daily_close(df)
-
 def run_pipeline(days=250):
-    # --------- 1) Must-have bases (normalized) ----------
+    # 1) Must-have bases (normalized)
     must_have_raw = [
         "BTC","ETH","XRP","BNB","SOL","DOGE","TRX","ADA",
         "HYPE","XLM","SUI","LINK","BCH","HBAR","AVAX","TON",
         "LTC","1000 SHIB","DOT","UNIS"
     ]
-
-    # Normalize known variants to Binance-style bases
     normalize = {
-        "1000 SHIB": "SHIB",
         "1000SHIB": "SHIB",
         "UNIS": "UNI",
     }
-    must_have = [normalize.get(sym.upper().replace(" ", ""), sym.upper().replace(" ", "")) for sym in must_have_raw]
-    # Note: "HYPE" may not exist on Binance; we will log it if missing.
+    def norm(sym: str) -> str:
+        s = sym.upper().replace(" ", "")
+        return normalize.get(s, s)
 
-    # --------- 2) Add extra bases from CoinGecko to fill to 30 ----------
+    must_have = [norm(s) for s in must_have_raw]  # e.g., "1000SHIB" -> "SHIB", "UNIS" -> "UNI"
+
+    # 2) Add extra bases from CoinGecko to fill to 30
     bases_extra = get_top_symbols_for_headroom(limit=200)
-    # Keep order: must-haves first, then extras not already in must-have
     all_bases = must_have + [b for b in bases_extra if b not in must_have]
 
-    # --------- 3) Map to Binance tradable USDT pairs ----------
+    # 3) Map to Binance tradable USDT pairs
     pairs_all = map_to_valid_pair(all_bases, "USDT")
 
-    # Log any must-haves that did not make it to Binance pairs (unsupported or self-quote)
+    # Log any must-haves that did not resolve to a Binance pair
     listed_pairs_set = set(pairs_all)
     missing_must = [b for b in must_have if f"{b}USDT" not in listed_pairs_set]
     if missing_must:
         print("Must-have symbols NOT available on Binance (skipped):", missing_must)
 
-    # Keep exactly the first 30 tradable pairs
+    # Keep exactly the first 30 tradable pairs (must-haves come first)
     pairs = pairs_all[:30]
     print(f"Tradable Binance pairs (up to 30, must-haves first): {pairs}")
 
-    # --------- 4) Process & upsert ----------
+    # 4) Process & upsert
     all_rows = []
 
     for pair in pairs:
@@ -252,6 +256,7 @@ def run_pipeline(days=250):
 
             daily = daily.sort_values("date").reset_index(drop=True)
 
+            # Strict windows to avoid partial indicators
             daily["WMA_50"] = daily["close"].rolling(window=50, min_periods=50)\
                                             .apply(lambda s: wma(s, 50), raw=False)
             daily["WMA_200"] = daily["close"].rolling(window=200, min_periods=200)\
@@ -263,6 +268,7 @@ def run_pipeline(days=250):
             )
             daily["Previous_Position"] = daily["Position"].shift(1)
 
+            # Only keep rows where both WMAs exist (strict)
             daily = daily.dropna(subset=["close", "WMA_50", "WMA_200"]).reset_index(drop=True)
 
             out = daily[["date", "close", "WMA_50", "WMA_200", "Position", "Previous_Position"]].copy()
