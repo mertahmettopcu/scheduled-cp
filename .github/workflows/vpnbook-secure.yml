@@ -142,4 +142,6 @@ jobs:
 
       - name: Clean up
         if: always()
-        run: rm -f vpnbook.ovpn vpn-auth.txt /tmp/ovpn.log /tmp/ovpn.pid
+        run: |
+          rm -f vpnbook.ovpn vpn-auth.txt || true
+          sudo rm -f /tmp/ovpn.log /tmp/ovpn.pid || true
