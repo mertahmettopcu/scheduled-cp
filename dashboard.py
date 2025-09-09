@@ -6,6 +6,9 @@ from supabase import create_client
 
 st.set_page_config(page_title="Crypto WMA Dashboard", layout="wide")
 
+SPARK_DAYS = 30  # how many days to show in the sparkline
+
+# -------------------- Supabase creds --------------------
 def _read_supabase_creds():
     url = None
     key = None
@@ -39,6 +42,7 @@ def supabase_client():
 
 supabase = supabase_client()
 
+# -------------------- Data loader --------------------
 @st.cache_data(ttl=300)
 def load_data() -> pd.DataFrame:
     resp = supabase.table("coin_wma").select("*").execute()
@@ -46,39 +50,89 @@ def load_data() -> pd.DataFrame:
     df = pd.DataFrame(data)
     if df.empty:
         return df
+
     # normalize column names
     df.columns = [c.lower() for c in df.columns]
+
     # parse date
     if "date" in df.columns:
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
+
     # coerce numerics
     for col in ["close", "wma_50", "wma_200"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
+
     return df
 
+# -------------------- UI --------------------
 st.title("📈 Crypto WMA Dashboard")
 
 df = load_data()
 if df.empty:
     st.info("No data yet. Try running the pipeline, then refresh.")
-else:
-    needed = ["coin", "date", "close", "wma_50", "wma_200", "position", "previous_position"]
-    missing = [c for c in needed if c not in df.columns]
-    if missing:
-        st.error(f"Missing columns: {missing}\nAvailable: {list(df.columns)}")
-    else:
-        latest = (
-            df.sort_values(["coin", "date"])
-              .groupby("coin", as_index=False)
-              .tail(1)
-              .sort_values("coin")
-              .reset_index(drop=True)
-        )
-        st.subheader("Latest WMA snapshot per coin")
-        st.dataframe(latest[needed], use_container_width=True)
+    st.stop()
 
-        st.subheader("Recent rows (last 30 days)")
-        recent_cut = df["date"].max() - pd.Timedelta(days=30)
-        recent = df[df["date"] >= recent_cut].sort_values(["coin", "date"])
-        st.dataframe(recent[needed], use_container_width=True)
+needed = ["coin", "date", "close", "wma_50", "wma_200", "position", "previous_position"]
+missing = [c for c in needed if c not in df.columns]
+if missing:
+    st.error(f"Missing columns: {missing}\nAvailable: {list(df.columns)}")
+    st.stop()
+
+# Header stats
+last_dt = pd.to_datetime(df["date"]).max()
+unique_coins = df["coin"].nunique()
+c1, c2 = st.columns(2)
+c1.metric("Coins shown", f"{unique_coins}")
+c2.metric("Last updated (UTC)", last_dt.strftime("%Y-%m-%d") if pd.notnull(last_dt) else "—")
+
+# Latest row per coin (this will show ALL coins present in the table)
+latest = (
+    df.sort_values(["coin", "date"])
+      .groupby("coin", as_index=False)
+      .tail(1)
+      .sort_values("coin")
+      .reset_index(drop=True)
+)
+
+# Build sparkline data (last SPARK_DAYS closes per coin)
+cutoff = df["date"].max() - pd.Timedelta(days=SPARK_DAYS)
+recent = (
+    df[df["date"] >= cutoff]
+    .sort_values(["coin", "date"])[["coin", "date", "close"]]
+)
+
+series = (
+    recent.groupby("coin")["close"]
+          .apply(lambda s: [float(x) for x in s.tolist()])
+          .rename("trend")
+          .reset_index()
+)
+
+latest = latest.merge(series, on="coin", how="left")
+
+# Show table with sparkline column
+show_cols = ["coin", "date", "close", "wma_50", "wma_200", "position", "previous_position", "trend"]
+
+st.subheader("Latest WMA snapshot per coin")
+st.dataframe(
+    latest[show_cols],
+    use_container_width=True,
+    column_config={
+        "date": st.column_config.DatetimeColumn(format="YYYY-MM-DD"),
+        "close": st.column_config.NumberColumn(format="%.6f"),
+        "wma_50": st.column_config.NumberColumn(format="%.6f"),
+        "wma_200": st.column_config.NumberColumn(format="%.6f"),
+        "trend": st.column_config.LineChartColumn(
+            "trend (last 30d)",
+            width="medium",
+            y_min=None,
+            y_max=None,
+        ),
+    },
+)
+
+# Optional: detailed recent table
+st.subheader(f"Recent rows (last {SPARK_DAYS} days)")
+recent_table = df[df["date"] >= cutoff].sort_values(["coin", "date"])
+st.dataframe(recent_table[needed], use_container_width=True)
