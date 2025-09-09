@@ -86,7 +86,7 @@ c1, c2 = st.columns(2)
 c1.metric("Coins shown", f"{unique_coins}")
 c2.metric("Last updated (UTC)", last_dt.strftime("%Y-%m-%d") if pd.notnull(last_dt) else "—")
 
-# Latest row per coin (this will show ALL coins present in the table)
+# Latest row per coin
 latest = (
     df.sort_values(["coin", "date"])
       .groupby("coin", as_index=False)
@@ -111,8 +111,14 @@ series = (
 
 latest = latest.merge(series, on="coin", how="left")
 
+# Add status column to highlight changes in position
+latest["change"] = latest.apply(
+    lambda r: "🔔 Change" if r["position"] != r["previous_position"] else "✓ Stable",
+    axis=1
+)
+
 # Show table with sparkline column
-show_cols = ["coin", "date", "close", "wma_50", "wma_200", "position", "previous_position", "trend"]
+show_cols = ["coin", "date", "close", "wma_50", "wma_200", "position", "previous_position", "change", "trend"]
 
 st.subheader("Latest WMA snapshot per coin")
 st.dataframe(
@@ -123,16 +129,12 @@ st.dataframe(
         "close": st.column_config.NumberColumn(format="%.6f"),
         "wma_50": st.column_config.NumberColumn(format="%.6f"),
         "wma_200": st.column_config.NumberColumn(format="%.6f"),
+        "change": st.column_config.TextColumn("status"),
         "trend": st.column_config.LineChartColumn(
             "trend (last 30d)",
-            width="medium",
+            width="small",
             y_min=None,
             y_max=None,
         ),
     },
 )
-
-# Optional: detailed recent table
-st.subheader(f"Recent rows (last {SPARK_DAYS} days)")
-recent_table = df[df["date"] >= cutoff].sort_values(["coin", "date"])
-st.dataframe(recent_table[needed], use_container_width=True)
