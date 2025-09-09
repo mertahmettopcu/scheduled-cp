@@ -275,7 +275,13 @@ def run_pipeline(days=250):
             out = daily[["date", "close", "WMA_50", "WMA_200", "Position", "Previous_Position"]].copy()
             out["coin"] = sym
             out["date"] = pd.to_datetime(out["date"]).dt.date.astype(str)  # ISO YYYY-MM-DD
-
+            
+            out = out.rename(columns={
+                "WMA_50": "wma_50",
+                "WMA_200": "wma_200",
+                "Position": "position",
+                "Previous_Position": "previous_position",})
+          
             out = clean_for_json(out)
             rows = out.to_dict(orient="records")
             rows = to_native_types(rows)
@@ -301,7 +307,7 @@ def run_pipeline(days=250):
     # Upsert into Supabase (ensure unique index on (coin, date))
     try:
         print(f"Upserting {len(all_rows)} rows to Supabase...")
-        resp = supabase.table("coin_wma").upsert(all_rows).execute()
+        resp = supabase.table("coin_wma").upsert(all_rows, on_conflict=["coin", "date"]).execute()
         # supabase-py v2 returns an object with .data; print a light summary
         data_len = len(resp.data) if getattr(resp, "data", None) else None
         print(f"Supabase upsert OK. Rows echoed: {data_len}")
