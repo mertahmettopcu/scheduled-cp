@@ -43,7 +43,7 @@ jobs:
       - name: Run Python script
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: python crypto_pipeline_with_telegram.py
 
       # Step 7: Disconnect VPN
