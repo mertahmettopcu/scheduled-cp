@@ -1,43 +1,88 @@
- #!/usr/bin/env python3
- # dashboard.py - Streamlit app for coin_wma table
-import streamlit as st
+# dashboard.py
+import re
 import pandas as pd
+import streamlit as st
 from supabase import create_client
-SUPABASE_URL = st.secrets.get("SUPABASE_URL") or "https://YOUR-PROJECT-URL.supabase.co"
-SUPABASE_KEY = st.secrets.get("SUPABASE_KEY") or "YOUR-ANON-KEY"
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
 st.set_page_config(page_title="Crypto WMA Dashboard", layout="wide")
-st.title("Crypto WMA Dashboard (Noon Turkey-time closes)")
-st.markdown("Pick a coin to see history, or browse latest snapshot.")
+
+# -------------------- Supabase client (from Streamlit secrets) --------------------
+@st.cache_resource
+def supabase_client():
+    url = st.secrets["supabase"]["url"].strip()
+    key = st.secrets["supabase"]["key"].strip()
+    # remove any sneaky non-breaking spaces
+    url = re.sub(r"\u00A0", " ", url).strip()
+    key = re.sub(r"\u00A0", " ", key).strip()
+    return create_client(url, key)
+
+supabase = supabase_client()
+
+# -------------------- Data loader --------------------
 @st.cache_data(ttl=300)
-def load_data():
-   data = supabase.table("coin_wma").select("*").execute().data
-   df = pd.DataFrame(data)
-   if df.empty:
-       return df
-   df["date"] = pd.to_datetime(df["date"])
-   return df
+def load_data() -> pd.DataFrame:
+    resp = supabase.table("coin_wma").select("*").execute()
+    data = getattr(resp, "data", None) or []
+    df = pd.DataFrame(data)
+    if df.empty:
+        return df
+
+    # Normalize column names to lowercase
+    df.columns = [c.lower() for c in df.columns]
+
+    # Map any legacy names to the new snake_case (defensive)
+    rename_map = {
+        "wma_50": "wma_50",
+        "wma50": "wma_50",
+        "wma_200": "wma_200",
+        "wma200": "wma_200",
+        "position": "position",
+        "previous_position": "previous_position",
+        "close": "close",
+        "coin": "coin",
+        "date": "date",
+    }
+    df = df.rename(columns=rename_map)
+
+    # Parse date
+    if "date" in df.columns:
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+
+    # Basic type coercion (optional)
+    for col in ["close", "wma_50", "wma_200"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    return df
+
 df = load_data()
+
+st.title("📈 Crypto WMA Dashboard")
+
 if df.empty:
-   st.warning("No data in Supabase yet. Run the pipeline at least once.")
+    st.info("No data available yet. Populate the table and refresh.")
 else:
-   coins = sorted(df["coin"].unique())
-   selected = st.sidebar.selectbox("Coin", coins)
-   date_min = df["date"].min().date()
-   date_max = df["date"].max().date()
-   dr = st.sidebar.date_input("Date range", [date_min, date_max])
-   filtered = df[(df["coin"]==selected) & (df["date"]>=pd.to_datetime(dr[0])) & (df["date"]<=pd.to_datetime(dr[1]))].sort_values("date")
-   st.subheader("Latest snapshot for all coins")
-   latest = df.sort_values("date").groupby("coin").tail(1)
-   st.dataframe(latest[["coin","date","close","WMA_50","WMA_200","position","previous_position"]])
-   st.subheader(f"{selected} history")
-   st.line_chart(filtered.set_index("date")[["close","wma_50","wma_200"]].rename(columns={"wma_50":"WMA_50","wma_200":"WMA_200"}))
-   st.subheader("Quick previews (last 30 days)")
-   last30 = df[df["date"] > df["date"].max() - pd.Timedelta(days=30)]
-   cols = st.columns(5)
-   for i, coin in enumerate(sorted(last30["coin"].unique())[:15]):
-       sub = last30[last30["coin"]==coin]
-       with cols[i % 5]:
-           st.caption(coin)
-           if not sub.empty:
-               st.line_chart(sub.set_index("date")["close"])
+    needed = ["coin", "date", "close", "wma_50", "wma_200", "position", "previous_position"]
+    missing = [c for c in needed if c not in df.columns]
+
+    if missing:
+        st.error(f"Missing columns in data: {missing}\nAvailable columns: {list(df.columns)}")
+    else:
+        # Latest row per coin
+        latest = (
+            df.sort_values(["coin", "date"])
+              .groupby("coin", as_index=False)
+              .tail(1)
+              .sort_values("coin")
+              .reset_index(drop=True)
+        )
+
+        st.subheader("Latest WMA snapshot per coin")
+        st.dataframe(latest[needed], use_container_width=True)
+
+        # Recent 30 days (optional)
+        if pd.notna(df["date"]).any():
+            st.subheader("Recent rows (last 30 days)")
+            recent_cut = df["date"].max() - pd.Timedelta(days=30)
+            recent = df[df["date"] >= recent_cut].sort_values(["coin", "date"])
+            st.dataframe(recent[needed], use_container_width=True)
