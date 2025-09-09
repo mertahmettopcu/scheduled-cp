@@ -1,7 +1,7 @@
 name: VPNBook Secure Workflow
 
 on:
-  workflow_dispatch:  # Manual trigger
+  workflow_dispatch:
   push:
     branches:
       - main
@@ -9,47 +9,119 @@ on:
 jobs:
   vpn-job:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       # Step 1: Checkout repo
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       # Step 2: Install OpenVPN
       - name: Install OpenVPN
-        run: sudo apt-get update && sudo apt-get install -y openvpn
-
-      # Step 3: Create VPN config file from secret
-      - name: Create OVPN file
-        run: echo "${{ secrets.VPN_OVPN }}" > vpnbook.ovpn
-
-      # Step 4: Create VPN auth file
-      - name: Create VPN auth
-        run: echo -e "${{ secrets.VPN_USER }}\n${{ secrets.VPN_PASS }}" > vpn-auth.txt
-
-      # Step 5: Start OpenVPN
-      - name: Connect to VPNBook
         run: |
-          sudo openvpn --config vpnbook.ovpn --auth-user-pass vpn-auth.txt &
-          sleep 15  # wait for VPN connection to establish
+          sudo apt-get update
+          sudo apt-get install -y openvpn
+          openvpn --version
 
-      # Step 5.1: Install Python dependencies
+      # Step 3: Install Python dependencies (before VPN to avoid blocked mirrors)
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          fi
 
-      # Step 6: Run Python script with Supabase secrets
+      # Step 4: Create VPN config file from secret (exact content)
+      - name: Create OVPN file
+        shell: bash
+        env:
+          VPN_OVPN: ${{ secrets.VPN_OVPN }}
+        run: |
+          # Write the .ovpn exactly as stored in the secret
+          printf '%s' "$VPN_OVPN" > vpnbook.ovpn
+
+          # If the config doesn't specify an auth file, add it
+          if ! grep -qi '^auth-user-pass' vpnbook.ovpn; then
+            echo 'auth-user-pass vpn-auth.txt' >> vpnbook.ovpn
+          fi
+
+          # Avoid keeping the password in memory
+          grep -qi '^auth-nocache' vpnbook.ovpn || echo 'auth-nocache' >> vpnbook.ovpn
+
+          # Good file permissions so OpenVPN won't complain
+          chmod 600 vpnbook.ovpn
+
+      # Step 5: Create VPN auth file (two lines: username then password)
+      - name: Create VPN auth
+        shell: bash
+        env:
+          VPN_USER: ${{ secrets.VPN_USER }}
+          VPN_PASS: ${{ secrets.VPN_PASS }}
+        run: |
+          printf '%s\n%s\n' "$VPN_USER" "$VPN_PASS" > vpn-auth.txt
+          chmod 600 vpn-auth.txt
+
+      # Step 6: Connect to VPNBook (wait until connected or fail fast)
+      - name: Connect to VPNBook
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Start as a daemon and keep logs
+          sudo openvpn \
+            --config vpnbook.ovpn \
+            --auth-user-pass vpn-auth.txt \
+            --daemon \
+            --writepid /tmp/ovpn.pid \
+            --log /tmp/ovpn.log
+
+          echo "OpenVPN started. Tailing log briefly..."
+          sleep 2
+          sudo tail -n 50 /tmp/ovpn.log || true
+
+          echo "Waiting for connection (up to ~60s)..."
+          for i in {1..30}; do
+            if sudo grep -q 'AUTH_FAILED' /tmp/ovpn.log; then
+              echo "::error ::VPN login failed (VPNBook rotates passwords—update VPN_USER/VPN_PASS)."
+              sudo tail -n +1 /tmp/ovpn.log || true
+              exit 1
+            fi
+            if sudo grep -q 'Initialization Sequence Completed' /tmp/ovpn.log; then
+              echo "VPN connected."
+              break
+            fi
+            sleep 2
+          done
+
+          if ! sudo grep -q 'Initialization Sequence Completed' /tmp/ovpn.log; then
+            echo "::error ::VPN did not connect in time. Last log lines:"
+            sudo tail -n 200 /tmp/ovpn.log || true
+            exit 1
+          fi
+
+          echo "---- OpenVPN last log lines ----"
+          sudo tail -n 50 /tmp/ovpn.log || true
+
+      # Step 7: Run Python script with Supabase secrets (now inside VPN)
       - name: Run Python script
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: python crypto_pipeline_with_telegram.py
 
-      # Step 7: Disconnect VPN
+      # Step 8: Disconnect VPN (always runs)
       - name: Disconnect OpenVPN
-        run: sudo pkill openvpn
+        if: always()
+        run: |
+          if [ -f /tmp/ovpn.pid ]; then
+            sudo kill "$(cat /tmp/ovpn.pid)" || true
+            sleep 2
+          fi
+          sudo pkill -x openvpn || true
+          echo "---- Final OpenVPN log ----"
+          sudo tail -n +1 /tmp/ovpn.log || true
 
-      # Step 8: Clean up auth file
+      # Step 9: Clean up sensitive files
       - name: Clean up
-        run: rm -f vpnbook.ovpn vpn-auth.txt
+        if: always()
+        run: rm -f vpnbook.ovpn vpn-auth.txt /tmp/ovpn.log /tmp/ovpn.pid
