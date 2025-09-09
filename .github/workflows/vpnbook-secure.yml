@@ -1,0 +1,46 @@
+name: VPNBook Secure Workflow
+
+on:
+  workflow_dispatch:  # Manual trigger
+  push:
+    branches:
+      - main
+
+jobs:
+  vpn-job:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Step 1: Checkout repo
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      # Step 2: Install OpenVPN
+      - name: Install OpenVPN
+        run: sudo apt-get update && sudo apt-get install -y openvpn
+
+      # Step 3: Create VPN config file from secret
+      - name: Create OVPN file
+        run: echo "${{ secrets.VPN_OVPN }}" > vpnbook.ovpn
+
+      # Step 4: Create VPN auth file
+      - name: Create VPN auth
+        run: echo -e "${{ secrets.VPN_USER }}\n${{ secrets.VPN_PASS }}" > vpn-auth.txt
+
+      # Step 5: Start OpenVPN
+      - name: Connect to VPNBook
+        run: |
+          sudo openvpn --config vpnbook.ovpn --auth-user-pass vpn-auth.txt &
+          sleep 15  # wait for VPN connection to establish
+
+      # Step 6: Run your script
+      - name: Run Python script
+        run: python crypto_pipeline_with_telegram.py
+
+      # Step 7: Disconnect VPN
+      - name: Disconnect OpenVPN
+        run: sudo pkill openvpn
+
+      # Step 8: Clean up auth file
+      - name: Clean up
+        run: rm -f vpnbook.ovpn vpn-auth.txt
