@@ -54,7 +54,7 @@ def send_telegram_alert(message: str):
 def get_top_30():
     url = "https://api.coingecko.com/api/v3/coins/markets"
     # NOTE: set per_page back to 30 when you’re ready
-    params = {"vs_currency": "usd", "order": "market_cap_desc", "per_page": 10, "page": 1}
+    params = {"vs_currency": "usd", "order": "market_cap_desc", "per_page": 40, "page": 1}
     resp = requests.get(url, params=params, timeout=20)
     resp.raise_for_status()
     data = resp.json()
@@ -246,7 +246,7 @@ def run_pipeline(days=250):
 
     all_rows = []
 
-    for pair in pairs:
+    for pair in pairs[:30]:
         sym = pair.replace("USDT", "")
         try:
             print("Processing", sym)
