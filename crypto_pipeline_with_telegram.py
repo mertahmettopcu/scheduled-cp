@@ -24,6 +24,8 @@ import requests
 import pandas as pd
 from datetime import datetime, timezone
 from supabase import create_client, Client
+from zoneinfo import ZoneInfo
+
 
 # -------------------------- Config (via environment variables) --------------------------
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -115,43 +117,51 @@ def get_binance_noon_series(symbol: str, days: int = 250):
     """
     pair = f"{symbol}USDT"
 
-    # Build the set of local dates we want (unique, sorted)
-    end_utc = pd.Timestamp.utcnow().tz_localize("UTC")
-    dates_local = [(end_utc - pd.Timedelta(d, "D")).tz_convert("Europe/Istanbul").date()
-                   for d in range(days + 10)]  # +margin
+    # Build the set of local dates we want (unique, sorted), using zoneinfo to avoid pandas tz issues
+    now_utc = datetime.now(timezone.utc)
+    ist = ZoneInfo("Europe/Istanbul")
+
+    dates_local = []
+    # +10 extra days as margin so WMA rolling windows have breathing room
+    for d in range(days + 10):
+        # Take "today in Istanbul", step back d days, and keep DATE only
+        ist_now = now_utc.astimezone(ist)
+        target_local_date = (ist_now.date() - pd.Timedelta(days=d).to_pytimedelta())
+        dates_local.append(target_local_date)
     dates_local = sorted(set(dates_local))
 
     rows = []
     for d in dates_local:
-        ts_local = pd.Timestamp(d, tz="Europe/Istanbul") + pd.Timedelta(hours=12)  # 12:00 local
-        ts_utc = ts_local.tz_convert("UTC")
+        # Build 12:00 local time (tz-aware), then convert to UTC ms
+        ts_local = datetime(d.year, d.month, d.day, 12, 0, 0, tzinfo=ist)
+        ts_utc = ts_local.astimezone(timezone.utc)
         start_ms = int(ts_utc.timestamp() * 1000)
 
         try:
-            # First try: request starting exactly at the minute
+            # First try: exact 12:00 minute
             data = fetch_minute_klines_exact(pair, start_ms=start_ms, limit=1)
             got_exact = False
             if data:
                 open_ms = data[0][0]
                 if open_ms == start_ms:
                     close_price = float(data[0][4])
-                    rows.append({"date": pd.to_datetime(d), "close": close_price})
+                    rows.append({"date": pd.Timestamp(d), "close": close_price})
                     got_exact = True
 
             if not got_exact:
-                # Fallback: pull a tiny 3-minute window around target and scan for exact opening minute
+                # Fallback: small window around 12:00 (11:59–12:01) to find the exact opening minute
                 window_start = start_ms - 60_000
                 data2 = fetch_minute_klines_exact(pair, start_ms=window_start, limit=3)
                 found = False
                 for k in data2 or []:
                     if k[0] == start_ms:
                         close_price = float(k[4])
-                        rows.append({"date": pd.to_datetime(d), "close": close_price})
+                        rows.append({"date": pd.Timestamp(d), "close": close_price})
                         found = True
                         break
                 if not found:
                     print(f"[{pair}] Missing exact 12:00 local minute for {d}")
-            time.sleep(0.05)  # be gentle
+            time.sleep(0.05)  # be gentle with API
 
         except requests.HTTPError as e:
             print(f"[{pair}] HTTP error for {d}: {e}")
@@ -165,6 +175,7 @@ def get_binance_noon_series(symbol: str, days: int = 250):
 
     daily = pd.DataFrame(rows).dropna().sort_values("date").reset_index(drop=True)
     return daily
+
 
 # -------------------------- Indicators & classification ---------------------------------
 def wma(series: pd.Series, window: int):
