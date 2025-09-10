@@ -98,21 +98,28 @@ if missing:
     st.error(f"Missing columns: {missing}\nAvailable: {list(df.columns)}")
     st.stop()
 
-# Header stats
-last_dt = pd.to_datetime(df["date"]).max()
-unique_coins = df["coin"].nunique()
+# Keep only rows that have full indicators (these are the only ones that produce a status)
+valid = df.dropna(subset=["wma_50", "wma_200"]).copy()
+if valid.empty:
+    st.warning("No valid WMA rows yet (need at least 200 daily points per coin).")
+    st.stop()
+
+# Header stats (after filtering)
+last_dt = pd.to_datetime(valid["date"]).max()
+unique_coins = valid["coin"].nunique()
 c1, c2 = st.columns(2)
 c1.metric("Coins shown", f"{unique_coins}")
-c2.metric("Last updated (UTC)", last_dt.strftime("%Y-%m-%d") if pd.notnull(last_dt) else "—")
+c2.metric("Last updated (UTC)", last_dt.strftime("%Y-%m-%d"))
 
-# Latest row per coin
+# Latest row per coin WITH full WMAs
 latest = (
-    df.sort_values(["coin", "date"])
-      .groupby("coin", as_index=False)
-      .tail(1)
-      .sort_values("coin")
-      .reset_index(drop=True)
+    valid.sort_values(["coin", "date"])
+         .groupby("coin", as_index=False)
+         .tail(1)
+         .sort_values("coin")
+         .reset_index(drop=True)
 )
+
 
 # Build sparkline data (last SPARK_DAYS closes per coin)
 cutoff = df["date"].max() - pd.Timedelta(days=SPARK_DAYS)
