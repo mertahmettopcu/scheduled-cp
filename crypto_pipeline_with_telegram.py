@@ -40,7 +40,7 @@ IST = ZoneInfo("Europe/Istanbul")
 MIN_ROWS_FOR_WMA200 = 220   # rows per coin we target to ensure WMA200 is computable
 
 # ---------- Telegram ----------
-def send_telegram_alert(message: str):
+def send_telegram_alert(message: str, coin: str | None = None):
     if not (BOT_TOKEN and CHAT_ID):
         print("ℹ️ Telegram not configured; skipping alert.")
         return
@@ -51,11 +51,12 @@ def send_telegram_alert(message: str):
             timeout=15,
         )
         if resp.status_code != 200:
-            print("❌ Telegram API error:", resp.status_code, resp.text)
+            print(f"❌ Telegram API error ({coin or 'unknown coin'}):", resp.status_code, resp.text)
         else:
-            print("✅ Telegram alert sent")
+            print(f"✅ Telegram alert sent for {coin or 'unknown coin'}")
     except Exception as e:
-        print("❌ Telegram send failed:", e)
+        print(f"❌ Telegram send failed ({coin or 'unknown coin'}):", e)
+
 
 # ---------- CoinGecko ----------
 def get_top_symbols_for_headroom(limit: int = 200) -> list[str]:
@@ -322,7 +323,7 @@ def run_pipeline():
                     prev, latest = daily.iloc[-2], daily.iloc[-1]
                     if latest["Position"] != prev["Position"]:
                         msg = f"{sym} changed position: {prev['Position']} → {latest['Position']}\nClose: {latest['close']}"
-                        send_telegram_alert(msg)
+                        send_telegram_alert(msg, coin=sym)
 
         except Exception as e:
             print(f"❌ Error processing {sym}: {e}")
