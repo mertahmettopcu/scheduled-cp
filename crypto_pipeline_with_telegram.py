@@ -168,7 +168,6 @@ def get_latest_dates_from_supabase() -> dict[str, str]:
 def get_row_count_from_supabase(coin: str) -> int:
     """How many rows we already have for this coin? (used to auto-backfill if < 220)"""
     try:
-        # Lightweight count: select primary keys only
         resp = supabase.table("coin_wma").select("date", count="exact").eq("coin", coin).execute()
         return int(getattr(resp, "count", 0) or 0)
     except Exception:
@@ -197,12 +196,10 @@ def dates_to_fetch_for_coin(coin: str, latest_map: dict[str, str], backfill_days
     today_local = datetime.now(tz=IST).date()
     current_rows = get_row_count_from_supabase(coin)
 
-    # Not enough history → backfill a rolling window
     if current_rows < backfill_days:
         start = today_local - pd.Timedelta(days=backfill_days - 1)
         return pd.date_range(start, today_local, freq="D").date.tolist()
 
-    # Enough history → just the missing recent days
     if coin in latest_map:
         last = pd.to_datetime(latest_map[coin]).date()
         start = last + pd.Timedelta(days=1)
@@ -210,7 +207,6 @@ def dates_to_fetch_for_coin(coin: str, latest_map: dict[str, str], backfill_days
             return []
         return pd.date_range(start, today_local, freq="D").date.tolist()
 
-    # Fallback (shouldn't happen if current_rows logic above fired)
     start = today_local - pd.Timedelta(days=backfill_days - 1)
     return pd.date_range(start, today_local, freq="D").date.tolist()
 
@@ -319,12 +315,14 @@ def run_pipeline():
             out = clean_for_json(out)
             all_rows.extend(to_native_types(out.to_dict(orient="records")))
 
-            # Alert only if the last row we inserted is today's (or latest needed) and it changed
-            if len(daily) >= 2 and daily.iloc[-1]["date"].dt.tz_localize(None).date() in need_dates:
-                prev, latest = daily.iloc[-2], daily.iloc[-1]
-                if latest["Position"] != prev["Position"]:
-                    msg = f"{sym} changed position: {prev['Position']} → {latest['Position']}\nClose: {latest['close']}"
-                    send_telegram_alert(msg)
+            # Alert only if the last row we inserted is among need_dates and changed vs previous
+            if len(daily) >= 2:
+                last_day = pd.to_datetime(daily.iloc[-1]["date"]).date()
+                if last_day in need_dates:
+                    prev, latest = daily.iloc[-2], daily.iloc[-1]
+                    if latest["Position"] != prev["Position"]:
+                        msg = f"{sym} changed position: {prev['Position']} → {latest['Position']}\nClose: {latest['close']}"
+                        send_telegram_alert(msg)
 
         except Exception as e:
             print(f"❌ Error processing {sym}: {e}")
