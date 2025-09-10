@@ -61,7 +61,7 @@ def load_data():
     while True:
         resp = (
             supabase
-            .table("coin_wma")
+            .table("coin_price_daily")
             .select("coin,date,close")
             .order("coin", desc=False)
             .order("date", desc=False)
