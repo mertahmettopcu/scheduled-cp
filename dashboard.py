@@ -50,9 +50,34 @@ def load_data():
     snap = supabase.table("coin_wma_latest").select("*").execute()
     df_latest = pd.DataFrame(snap.data or [])
 
-    # History for tiny charts
-    hist = supabase.table("coin_wma").select("coin,date,close").execute()
-    df_hist = pd.DataFrame(hist.data or [])
+    # -------- Paged fetch for history (to bypass the 1000-row default limit) --------
+    page_size = 2000  # safe cushion; can adjust up/down
+    offset = 0
+    hist_rows = []
+
+    # You get the most predictable results if you ORDER before you RANGE
+    # (PostgREST applies range after ordering).
+    # We request only the columns we need.
+    while True:
+        resp = (
+            supabase
+            .table("coin_wma")
+            .select("coin,date,close")
+            .order("coin", desc=False)
+            .order("date", desc=False)
+            .range(offset, offset + page_size - 1)
+            .execute()
+        )
+        batch = resp.data or []
+        if not batch:
+            break
+        hist_rows.extend(batch)
+        offset += page_size
+        # defensive stop (in case someone removes ordering), but practically not needed
+        if len(batch) < page_size:
+            break
+
+    df_hist = pd.DataFrame(hist_rows)
     return df_latest, df_hist
 
 st.title("📈 Crypto WMA Dashboard")
@@ -84,7 +109,7 @@ def _spark_with_trend_png(y: np.ndarray) -> str | None:
     - linear regression trendline (dashed, slightly thicker)
     Returns a data URI (base64 PNG) suitable for ImageColumn, or None if not enough data.
     """
-    if y is None or len(y) < 5 or np.isnan(y).all():
+    if y is None or len(y) < 2 or np.isnan(y).all():
         return None
 
     # Clean NaNs (drop; keep relative index spacing)
