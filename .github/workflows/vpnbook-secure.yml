@@ -133,11 +133,16 @@ jobs:
           PYTHONUNBUFFERED: "1"
         run: python -u crypto_pipeline_with_telegram.py
 
-      - name: Sparkline diagnostics (prints to logs only)
-        run: python sparkline_diag.py
+      - name: Sparkline diagnostics (fail while building)
+        run: python tools/sparkline_diag.py
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          # Tune these if you want:
+          SPARK_DAYS: "30"            # how many days your dashboard shows
+          MIN_REQUIRED_POINTS: "10"   # minimum points we require to render a sparkline
+          WARN_ONLY: "0"              # 0 = fail job if any coin is missing, 1 = warn only
+
 
 
       - name: Disconnect OpenVPN
