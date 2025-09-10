@@ -123,11 +123,15 @@ jobs:
             exit 1
           fi
 
+
       - name: Run Python script (inside VPN)
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python crypto_pipeline_with_telegram.py
+
 
       - name: Disconnect OpenVPN
         if: always()
