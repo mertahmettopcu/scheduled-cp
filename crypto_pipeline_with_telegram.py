@@ -1,14 +1,5 @@
 #!/usr/bin/env python3
-"""
-Hourly -> daily(noon Istanbul) -> WMA(50/200) -> classify -> upsert (incremental) -> Telegram alerts
-
-Environment:
-  SUPABASE_URL, SUPABASE_KEY
-  TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
-"""
-
-import os
-import time
+import os, time
 from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Optional
 
@@ -18,19 +9,17 @@ import requests
 from supabase import create_client, Client
 
 # -------------------- Config --------------------
-DAYS_BACK = 260            # history to fetch (daily points)
+DAYS_BACK = 260
 NOON_TZ = "Europe/Istanbul"
 BINANCE_API = "https://api.binance.com"
-SAVE_LAST_N_DAYS = 220     # only upsert most-recent N daily rows / coin
-REQUEST_TIMEOUT = 20       # seconds
+SAVE_LAST_N_DAYS = 220
+REQUEST_TIMEOUT = 20
 
-# Must-have bases (uppercased); we'll map to *USDT* spot pairs if available
 MUST_HAVE_BASES = [
     "BTC","ETH","XRP","BNB","SOL","DOGE","TRX","ADA","HYPE","XLM","SUI",
     "LINK","BCH","HBAR","AVAX","TON","LTC","SHIB","DOT","UNI"
 ]
 
-# -------------------- Env / clients --------------------
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -62,7 +51,7 @@ def send_telegram(text: str) -> bool:
 
 # -------------------- Binance helpers --------------------
 def get_binance_spot_symbols() -> set:
-    r = requests.get(f"{BINANCE_API}/api/v3/exchangeInfo", timeout=REQUEST_TIMEOUT)
+    r = requests.get(f"https://api.binance.com/api/v3/exchangeInfo", timeout=REQUEST_TIMEOUT)
     r.raise_for_status()
     info = r.json()
     return {s["symbol"] for s in info.get("symbols", []) if s.get("status") == "TRADING"}
@@ -70,7 +59,6 @@ def get_binance_spot_symbols() -> set:
 def select_pairs(must_have: List[str], take_total: int = 30) -> List[str]:
     listed = get_binance_spot_symbols()
     pairs = []
-
     skipped = []
     for b in must_have:
         if b.upper() == "USDT":
@@ -81,7 +69,6 @@ def select_pairs(must_have: List[str], take_total: int = 30) -> List[str]:
         else:
             skipped.append(b)
 
-    # fill the rest from top market cap (CoinGecko), but keep must-haves first
     if len(pairs) < take_total:
         try:
             cg = requests.get(
@@ -90,8 +77,8 @@ def select_pairs(must_have: List[str], take_total: int = 30) -> List[str]:
                 timeout=REQUEST_TIMEOUT,
             )
             cg.raise_for_status()
-            symbols = [row["symbol"].upper() + "USDT" for row in cg.json()]
-            for sym in symbols:
+            for row in cg.json():
+                sym = row["symbol"].upper() + "USDT"
                 if sym.endswith("USDT") and sym in listed and sym not in pairs:
                     pairs.append(sym)
                     if len(pairs) >= take_total:
@@ -101,14 +88,13 @@ def select_pairs(must_have: List[str], take_total: int = 30) -> List[str]:
 
     if skipped:
         log(f"Must-have symbols NOT available on Binance (skipped): {skipped}")
-    log(f"✅ Tradable pairs (up to {take_total}, must-haves first): {pairs}")
+    log(f"✅ Tradable pairs (up to {take_total}, must-haves first): {pairs[:take_total]}")
     return pairs[:take_total]
 
 def fetch_hourly(pair: str, start_ms: int, end_ms: int) -> List[List]:
     out: List[List] = []
     curr = start_ms
     backoff = 0.25
-
     while curr < end_ms:
         hours = int((end_ms - curr) / (3600 * 1000)) + 1
         limit = max(1, min(1000, hours))
@@ -137,10 +123,8 @@ def fetch_hourly(pair: str, start_ms: int, end_ms: int) -> List[List]:
 # -------------------- Transform --------------------
 def hourly_to_noon_istanbul(hourly_df: pd.DataFrame) -> pd.DataFrame:
     df = hourly_df.copy()
-    # Ensure tz-aware UTC
-    df["open_time"] = pd.to_datetime(df["open_time"], utc=True)
-    # Convert to local tz and pick hour closest to 12:00
-    local = df["open_time"].dt.tz_convert(NOON_TZ)
+    df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
+    local = df["open_time"].dt.tz_convert("Europe/Istanbul")
     df["local_date"] = local.dt.date
     df["h_diff"] = (local.dt.hour - 12).abs()
     idx = df.groupby("local_date")["h_diff"].idxmin()
@@ -153,23 +137,42 @@ def wma(series: pd.Series, window: int) -> float:
     s = series.astype(float)
     if len(s) < window or s.isna().any():
         return np.nan
-    weights = np.arange(1, window + 1, dtype=float)
-    return float((s.to_numpy() * weights).sum() / weights.sum())
+    w = np.arange(1, window + 1, dtype=float)
+    return float((s.to_numpy() * w).sum() / w.sum())
 
 def classify(close: float, w50: float, w200: float) -> str:
     if any(pd.isna([close, w50, w200])):
         return "Not enough data"
     lo, hi = min(w50, w200), max(w50, w200)
-    if close > hi:
-        return "Above both"
-    if close < lo:
-        return "Below both"
+    if close > hi:  return "Above both"
+    if close < lo:  return "Below both"
     return "Between"
 
-# -------------------- Main per-coin --------------------
+# ---------- JSON-safe conversion (fixes your crash) ----------
+def to_json_safe_records(df: pd.DataFrame) -> List[Dict]:
+    df = df.copy()
+    # numeric coercion + inf → nan
+    for c in ["close", "wma_50", "wma_200"]:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+            df[c] = df[c].replace([np.inf, -np.inf], np.nan)
+    # NaN → None
+    df = df.where(pd.notna(df), None)
+    # Convert NumPy scalars to native Python types
+    out = []
+    for r in df.to_dict(orient="records"):
+        for k, v in list(r.items()):
+            if isinstance(v, (np.floating,)):
+                r[k] = float(v)
+            elif isinstance(v, (np.integer,)):
+                r[k] = int(v)
+        out.append(r)
+    return out
+
+# -------------------- Per-coin --------------------
 def build_daily_for_symbol(base: str, days_back: int) -> Optional[pd.DataFrame]:
     end_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-    start_ms = end_ms - int((days_back + 14) * 24 * 3600 * 1000)  # buffer
+    start_ms = end_ms - int((days_back + 14) * 24 * 3600 * 1000)
 
     pair = f"{base}USDT"
     raw = fetch_hourly(pair, start_ms, end_ms)
@@ -187,24 +190,25 @@ def build_daily_for_symbol(base: str, days_back: int) -> Optional[pd.DataFrame]:
         return None
 
     daily = daily.sort_values("date").reset_index(drop=True)
-    # WMAs (require full windows)
-    daily["wma_50"]  = daily["close"].rolling(window=50, min_periods=50).apply(lambda s: wma(s, 50), raw=False)
+    daily["wma_50"]  = daily["close"].rolling(window=50,  min_periods=50 ).apply(lambda s: wma(s, 50),  raw=False)
     daily["wma_200"] = daily["close"].rolling(window=200, min_periods=200).apply(lambda s: wma(s, 200), raw=False)
     daily["position"] = daily.apply(lambda r: classify(r["close"], r["wma_50"], r["wma_200"]), axis=1)
     daily["previous_position"] = daily["position"].shift(1)
 
-    # keep last N days for upsert
+    # Keep ONLY rows that have full WMAs so the dashboard gets valid positions
+    daily = daily.dropna(subset=["wma_50", "wma_200"]).reset_index(drop=True)
+
     if SAVE_LAST_N_DAYS:
         daily = daily.tail(SAVE_LAST_N_DAYS).reset_index(drop=True)
 
     daily["coin"] = base
-    daily["date"] = pd.to_datetime(daily["date"]).dt.date.astype(str)  # ISO yyyy-mm-dd strings
+    daily["date"] = pd.to_datetime(daily["date"]).dt.date.astype(str)
     return daily[["coin","date","close","wma_50","wma_200","position","previous_position"]]
 
 # -------------------- Run --------------------
 def run():
     pairs = select_pairs(MUST_HAVE_BASES, take_total=30)
-    bases = [p.replace("USDT", "") for p in pairs]
+    bases = [p.replace("USDT","") for p in pairs]
 
     all_rows: List[Dict] = []
     alerts = 0
@@ -215,13 +219,12 @@ def run():
         try:
             daily = build_daily_for_symbol(base, DAYS_BACK)
             if daily is None or daily.empty:
-                log(f"  └─ no data for {base}")
+                log(f"  └─ no usable rows (not enough history for WMA-200?)")
                 continue
 
-            # Telegram: if latest position changed vs previous
+            # Telegram alert on position change (latest vs previous)
             if len(daily) >= 2:
-                latest = daily.iloc[-1]
-                prev   = daily.iloc[-2]
+                latest, prev = daily.iloc[-1], daily.iloc[-2]
                 if latest["position"] != prev["position"]:
                     msg = (
                         f"{base} changed position: {prev['position']} → {latest['position']}\n"
@@ -232,10 +235,7 @@ def run():
                         log(f"  └─ ✅ Telegram alert sent for {base}")
 
             latest_dates[base] = daily.iloc[-1]["date"]
-
-            # JSON-safe rows (NaN → None)
-            clean = daily.where(pd.notna(daily), None)
-            all_rows.extend(clean.to_dict(orient="records"))
+            all_rows.extend(to_json_safe_records(daily))
 
         except Exception as e:
             log(f"  └─ ❌ {base}: {e}")
@@ -244,7 +244,7 @@ def run():
         log("No rows to upsert.")
         return
 
-    # Dedup (coin,date)
+    # Deduplicate (coin,date)
     ded = {}
     for r in all_rows:
         ded[(r["coin"], r["date"])] = r
@@ -254,11 +254,9 @@ def run():
     supabase.table("coin_wma").upsert(payload, on_conflict="coin,date", returning="minimal").execute()
     log("✅ Supabase upsert complete")
 
-    # small summary
     max_dt = max(latest_dates.values()) if latest_dates else "—"
     log(f"Coins updated: {len(latest_dates)} | Most recent date: {max_dt} | Telegram alerts: {alerts}")
 
 if __name__ == "__main__":
-    # make logs unbuffered in GH Actions too
     os.environ["PYTHONUNBUFFERED"] = "1"
     run()
