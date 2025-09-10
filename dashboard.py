@@ -45,25 +45,44 @@ supabase = supabase_client()
 # -------------------- Data loader --------------------
 @st.cache_data(ttl=300)
 def load_data() -> pd.DataFrame:
-    resp = supabase.table("coin_wma").select("*").execute()
-    data = getattr(resp, "data", None) or []
-    df = pd.DataFrame(data)
+    PAGE_SIZE = 5000  # generous; tune as you like
+    rows = []
+    start = 0
+
+    while True:
+        end = start + PAGE_SIZE - 1
+        resp = (
+            supabase
+            .table("coin_wma")
+            .select("*")
+            .range(start, end)      # <-- fetch a page
+            .order("date")          # keep deterministic across pages
+            .execute()
+        )
+        batch = getattr(resp, "data", None) or []
+        if not batch:
+            break
+        rows.extend(batch)
+        if len(batch) < PAGE_SIZE:
+            break
+        start += PAGE_SIZE
+
+    df = pd.DataFrame(rows)
     if df.empty:
         return df
 
-    # normalize column names
+    # normalize columns
     df.columns = [c.lower() for c in df.columns]
 
-    # parse date
+    # parse/coerce
     if "date" in df.columns:
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
-
-    # coerce numerics
     for col in ["close", "wma_50", "wma_200"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
     return df
+
 
 # -------------------- UI --------------------
 st.title("📈 Crypto WMA Dashboard")
