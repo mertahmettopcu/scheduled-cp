@@ -26,7 +26,7 @@ def fetch_latest_snapshot() -> pd.DataFrame:
     return df
 
 def fetch_history() -> pd.DataFrame:
-    r = supabase.table("coin_wma").select("coin,date,close").execute()
+    r = supabase.table("coin_price_daily").select("coin,date,close").execute()
     df = pd.DataFrame(r.data or [])
     if not df.empty:
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
