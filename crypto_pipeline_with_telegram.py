@@ -202,6 +202,24 @@ def build_daily_for_symbol(base: str, days_back: int) -> Optional[pd.DataFrame]:
         return None
 
     daily = daily.sort_values("date").reset_index(drop=True)
+    
+    # Upsert raw daily closes for sparklines (no WMA filter)
+    raw_out = daily[["date", "close"]].copy()
+    raw_out["coin"] = base
+    raw_out["date"] = pd.to_datetime(raw_out["date"]).dt.date.astype(str)
+    
+    # JSON-safe rows
+    raw_rows = []
+    for r in raw_out.to_dict(orient="records"):
+        r["close"] = float(r["close"])
+        raw_rows.append(r)
+    
+    # Upsert raw history
+    if raw_rows:
+        supabase.table("coin_price_daily") \
+            .upsert(raw_rows, on_conflict="coin,date", returning="minimal") \
+            .execute()
+    # WMA calculation    
     daily["wma_50"]  = daily["close"].rolling(window=50,  min_periods=50 ).apply(lambda s: wma(s, 50),  raw=False)
     daily["wma_200"] = daily["close"].rolling(window=200, min_periods=200).apply(lambda s: wma(s, 200), raw=False)
     daily["position"] = daily.apply(lambda r: classify(r["close"], r["wma_50"], r["wma_200"]), axis=1)
