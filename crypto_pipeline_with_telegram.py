@@ -1,6 +1,19 @@
 #!/usr/bin/env python3
-import os, time
-from datetime import datetime, timezone, timedelta
+"""
+Final hourly pipeline:
+
+- Picks must-have coins + top caps (CoinGecko fallback), maps to valid Binance spot USDT pairs
+- Fetches hourly klines, selects candle closest to 12:00 Europe/Istanbul for each day
+- Computes WMA(50) & WMA(200) (full-window only)
+- Classifies position / previous_position
+- Upserts last N valid rows per coin into public.coin_wma (unique on (coin,date))
+- Publishes a single canonical latest row per coin into public.coin_wma_latest (PK coin)
+- Sends Telegram alert if today's position changed vs yesterday for that coin
+"""
+
+import os
+import time
+from datetime import datetime, timezone
 from typing import List, Dict, Optional
 
 import numpy as np
@@ -9,10 +22,10 @@ import requests
 from supabase import create_client, Client
 
 # -------------------- Config --------------------
-DAYS_BACK = 420
+DAYS_BACK = 260                 # how many days of OHLC hours to pull
+SAVE_LAST_N_DAYS = 220          # write only the last N valid (full-WMA) rows per coin
 NOON_TZ = "Europe/Istanbul"
 BINANCE_API = "https://api.binance.com"
-SAVE_LAST_N_DAYS = 365
 REQUEST_TIMEOUT = 20
 
 MUST_HAVE_BASES = [
@@ -38,9 +51,12 @@ def send_telegram(text: str) -> bool:
     if not (BOT_TOKEN and CHAT_ID):
         log("ℹ️ Telegram not configured; skipping alert.")
         return False
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     try:
-        r = requests.post(url, data={"chat_id": CHAT_ID, "text": text}, timeout=10)
+        r = requests.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+            data={"chat_id": CHAT_ID, "text": text},
+            timeout=10,
+        )
         ok = r.status_code == 200
         if not ok:
             log(f"❌ Telegram error {r.status_code}: {r.text[:200]}")
@@ -51,7 +67,7 @@ def send_telegram(text: str) -> bool:
 
 # -------------------- Binance helpers --------------------
 def get_binance_spot_symbols() -> set:
-    r = requests.get(f"https://api.binance.com/api/v3/exchangeInfo", timeout=REQUEST_TIMEOUT)
+    r = requests.get(f"{BINANCE_API}/api/v3/exchangeInfo", timeout=REQUEST_TIMEOUT)
     r.raise_for_status()
     info = r.json()
     return {s["symbol"] for s in info.get("symbols", []) if s.get("status") == "TRADING"}
@@ -73,13 +89,13 @@ def select_pairs(must_have: List[str], take_total: int = 30) -> List[str]:
         try:
             cg = requests.get(
                 "https://api.coingecko.com/api/v3/coins/markets",
-                params={"vs_currency": "usd", "order": "market_cap_desc", "per_page": 50, "page": 1},
+                params={"vs_currency": "usd", "order": "market_cap_desc", "per_page": 60, "page": 1},
                 timeout=REQUEST_TIMEOUT,
             )
             cg.raise_for_status()
             for row in cg.json():
                 sym = row["symbol"].upper() + "USDT"
-                if sym.endswith("USDT") and sym in listed and sym not in pairs:
+                if sym in listed and sym not in pairs:
                     pairs.append(sym)
                     if len(pairs) >= take_total:
                         break
@@ -111,7 +127,7 @@ def fetch_hourly(pair: str, start_ms: int, end_ms: int) -> List[List]:
                 break
             out.extend(data)
             last_open = data[-1][0]
-            if last_open <= curr:
+            if last_open <= curr:  # safety
                 break
             curr = last_open + 3600 * 1000
             time.sleep(0.12)
@@ -124,7 +140,7 @@ def fetch_hourly(pair: str, start_ms: int, end_ms: int) -> List[List]:
 def hourly_to_noon_istanbul(hourly_df: pd.DataFrame) -> pd.DataFrame:
     df = hourly_df.copy()
     df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
-    local = df["open_time"].dt.tz_convert("Europe/Istanbul")
+    local = df["open_time"].dt.tz_convert(NOON_TZ)
     df["local_date"] = local.dt.date
     df["h_diff"] = (local.dt.hour - 12).abs()
     idx = df.groupby("local_date")["h_diff"].idxmin()
@@ -134,7 +150,7 @@ def hourly_to_noon_istanbul(hourly_df: pd.DataFrame) -> pd.DataFrame:
     return d[["date", "close"]]
 
 def wma(series: pd.Series, window: int) -> float:
-    s = series.astype(float)
+    s = pd.to_numeric(series, errors="coerce")
     if len(s) < window or s.isna().any():
         return np.nan
     w = np.arange(1, window + 1, dtype=float)
@@ -148,17 +164,13 @@ def classify(close: float, w50: float, w200: float) -> str:
     if close < lo:  return "Below both"
     return "Between"
 
-# ---------- JSON-safe conversion (fixes your crash) ----------
 def to_json_safe_records(df: pd.DataFrame) -> List[Dict]:
     df = df.copy()
-    # numeric coercion + inf → nan
     for c in ["close", "wma_50", "wma_200"]:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
             df[c] = df[c].replace([np.inf, -np.inf], np.nan)
-    # NaN → None
     df = df.where(pd.notna(df), None)
-    # Convert NumPy scalars to native Python types
     out = []
     for r in df.to_dict(orient="records"):
         for k, v in list(r.items()):
@@ -169,7 +181,7 @@ def to_json_safe_records(df: pd.DataFrame) -> List[Dict]:
         out.append(r)
     return out
 
-# -------------------- Per-coin --------------------
+# -------------------- Per-coin build --------------------
 def build_daily_for_symbol(base: str, days_back: int) -> Optional[pd.DataFrame]:
     end_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
     start_ms = end_ms - int((days_back + 14) * 24 * 3600 * 1000)
@@ -195,7 +207,7 @@ def build_daily_for_symbol(base: str, days_back: int) -> Optional[pd.DataFrame]:
     daily["position"] = daily.apply(lambda r: classify(r["close"], r["wma_50"], r["wma_200"]), axis=1)
     daily["previous_position"] = daily["position"].shift(1)
 
-    # Keep ONLY rows that have full WMAs so the dashboard gets valid positions
+    # keep only rows with full WMAs -> valid positions
     daily = daily.dropna(subset=["wma_50", "wma_200"]).reset_index(drop=True)
 
     if SAVE_LAST_N_DAYS:
@@ -211,25 +223,22 @@ def run():
     bases = [p.replace("USDT","") for p in pairs]
 
     all_rows: List[Dict] = []
-    alerts = 0
     latest_dates: Dict[str, str] = {}
+    alerts = 0
 
     for base in bases:
         log(f"• Processing {base}")
         try:
             daily = build_daily_for_symbol(base, DAYS_BACK)
             if daily is None or daily.empty:
-                log(f"  └─ no usable rows (not enough history for WMA-200?)")
+                log("  └─ no usable rows (not enough history for WMA-200?)")
                 continue
 
             # Telegram alert on position change (latest vs previous)
             if len(daily) >= 2:
                 latest, prev = daily.iloc[-1], daily.iloc[-2]
                 if latest["position"] != prev["position"]:
-                    msg = (
-                        f"{base} changed position: {prev['position']} → {latest['position']}\n"
-                        f"Close: {float(latest['close']):.6g}"
-                    )
+                    msg = f"{base} changed position: {prev['position']} → {latest['position']}\nClose: {float(latest['close']):.6g}"
                     if send_telegram(msg):
                         alerts += 1
                         log(f"  └─ ✅ Telegram alert sent for {base}")
@@ -254,9 +263,31 @@ def run():
     supabase.table("coin_wma").upsert(payload, on_conflict="coin,date", returning="minimal").execute()
     log("✅ Supabase upsert complete")
 
+    # ---- Publish canonical latest per coin to coin_wma_latest ----
+    try:
+        snap_ready = [r for r in payload if r.get("wma_50") is not None and r.get("wma_200") is not None]
+        latest_map = {}
+        for r in snap_ready:
+            key = r["coin"]
+            if key not in latest_map or r["date"] > latest_map[key]["date"]:
+                latest_map[key] = r
+        latest_rows = list(latest_map.values())
+
+        # snapshot_date = today's date in Istanbul
+        ist_tz = pd.Timestamp.now(tz=NOON_TZ).tz
+        today_ist = datetime.now(timezone.utc).astimezone(ist_tz).date().isoformat()
+        for r in latest_rows:
+            r["snapshot_date"] = today_ist
+
+        supabase.table("coin_wma_latest").upsert(
+            latest_rows, on_conflict="coin", returning="minimal"
+        ).execute()
+        log(f"✅ Published {len(latest_rows)} rows to coin_wma_latest")
+    except Exception as e:
+        log(f"❌ Failed to publish coin_wma_latest: {e}")
+
     max_dt = max(latest_dates.values()) if latest_dates else "—"
     log(f"Coins updated: {len(latest_dates)} | Most recent date (Istanbul noon): {max_dt} | Telegram alerts: {alerts}")
-
 
 if __name__ == "__main__":
     os.environ["PYTHONUNBUFFERED"] = "1"
