@@ -1,22 +1,17 @@
 #!/usr/bin/env python3
 """
-crypto_pipeline_with_telegram.py  (Hourly, incremental + Telegram alerts)
+crypto_pipeline_with_telegram.py  (Hourly, incremental + auto-backfill + Telegram)
 
-- Must-have coin list is attempted first (with symbol normalization)
-- Add extra coins from CoinGecko (200) and keep first 30 Binance-tradable USDT pairs
-- Use Binance HOURLY klines; per day pick the candle closest to 12:00 Europe/Istanbul
-- INCREMENTAL: only fetch missing days per coin (fast), but pulls up to 199 prior days
-  from Supabase to compute accurate WMA windows for new rows
-- Compute WMA(50) and WMA(200) with strict windows
-- Classify position and previous_position
-- Upsert into Supabase (coin_wma) with conflict target (coin,date)
-- Send Telegram alerts on position change (latest vs previous)
+- Guarantees your must-have list (normalizes 1000 SHIB->SHIB, UNIS->UNI; HYPE is skipped if not on Binance)
+- Adds extra coins from CoinGecko to fill to 30 Binance-tradable USDT pairs
+- Uses Binance HOURLY klines, then picks the candle closest to 12:00 Europe/Istanbul per day
+- INCREMENTAL: fetches only missing days; if a coin has < 220 rows in DB, it auto-backfills
+- Computes WMA(50) and WMA(200) with strict windows; classifies position / previous_position
+- Upserts to Supabase with conflict target (coin,date)
+- Telegram alerts when a coin’s Position changes vs the prior day
 
-Env (required):
-  SUPABASE_URL, SUPABASE_KEY
-
-Env (optional but recommended for alerts):
-  TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+Env (required):  SUPABASE_URL, SUPABASE_KEY
+Env (optional):  TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 """
 
 import os
@@ -29,7 +24,7 @@ import pandas as pd
 import requests
 from supabase import create_client, Client
 
-# -------------------------- Config --------------------------
+# ---------- Config ----------
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -42,7 +37,9 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 SESSION = requests.Session()
 IST = ZoneInfo("Europe/Istanbul")
 
-# -------------------------- Telegram ------------------------
+MIN_ROWS_FOR_WMA200 = 220   # rows per coin we target to ensure WMA200 is computable
+
+# ---------- Telegram ----------
 def send_telegram_alert(message: str):
     if not (BOT_TOKEN and CHAT_ID):
         print("ℹ️ Telegram not configured; skipping alert.")
@@ -60,7 +57,7 @@ def send_telegram_alert(message: str):
     except Exception as e:
         print("❌ Telegram send failed:", e)
 
-# -------------------------- CoinGecko -----------------------
+# ---------- CoinGecko ----------
 def get_top_symbols_for_headroom(limit: int = 200) -> list[str]:
     url = "https://api.coingecko.com/api/v3/coins/markets"
     params = {"vs_currency": "usd", "order": "market_cap_desc", "per_page": limit, "page": 1}
@@ -68,10 +65,9 @@ def get_top_symbols_for_headroom(limit: int = 200) -> list[str]:
     resp.raise_for_status()
     return [item["symbol"].upper() for item in resp.json()]
 
-# -------------------------- Binance -------------------------
+# ---------- Binance ----------
 BINANCE_API = "https://api.binance.com"
 BINANCE_KLINES_URL = f"{BINANCE_API}/api/v3/klines"
-
 _BINANCE_SYMBOLS_CACHE: set[str] | None = None
 
 def get_binance_spot_symbols() -> set[str]:
@@ -101,11 +97,8 @@ def map_to_valid_pair(bases: list[str], quote: str = "USDT") -> list[str]:
     return out
 
 def fetch_hourly_klines(pair: str, start_ts_ms: int, end_ts_ms: int):
-    """Fetch hourly klines for pair between start and end timestamps (ms)."""
-    out = []
-    curr = start_ts_ms
-    it = 0
-    backoff = 0.2
+    """Fetch hourly klines in [start,end)."""
+    out, curr, it, backoff = [], start_ts_ms, 0, 0.2
     while curr < end_ts_ms and it < 200:
         hours_needed = int((end_ts_ms - curr) / (3600 * 1000)) + 1
         limit = min(1000, max(1, hours_needed))
@@ -113,9 +106,7 @@ def fetch_hourly_klines(pair: str, start_ts_ms: int, end_ts_ms: int):
         try:
             r = SESSION.get(BINANCE_KLINES_URL, params=params, timeout=15)
             if r.status_code == 429:
-                time.sleep(backoff)
-                backoff = min(backoff * 2, 4.0)
-                continue
+                time.sleep(backoff); backoff = min(backoff * 2, 4.0); continue
             r.raise_for_status()
             data = r.json()
             if not data:
@@ -133,7 +124,7 @@ def fetch_hourly_klines(pair: str, start_ts_ms: int, end_ts_ms: int):
         it += 1
     return out
 
-# -------------------------- Resample to "noon" --------------
+# ---------- Resample: hourly → “noon” ----------
 def hourly_to_noon_daily_close(hourly_df: pd.DataFrame):
     """Pick candle closest to 12:00 Europe/Istanbul per local day."""
     df = hourly_df.copy()
@@ -145,41 +136,43 @@ def hourly_to_noon_daily_close(hourly_df: pd.DataFrame):
     daily["date"] = pd.to_datetime(daily["local_date"])
     return daily[["date", "close"]].sort_values("date").reset_index(drop=True)
 
-# -------------------------- Indicators ----------------------
+# ---------- Indicators ----------
 def wma(series: pd.Series, window: int):
     s = series.dropna()
-    if len(s) < window:
-        return np.nan
+    if len(s) < window: return np.nan
     weights = np.arange(1, window + 1, dtype=float)
     return float((s.tail(window).to_numpy() * weights).sum() / weights.sum())
 
 def classify_position(close, wma50, wma200):
     if close is None or pd.isna(close) or pd.isna(wma50) or pd.isna(wma200):
         return "Not enough data"
-    if close > max(wma50, wma200):
-        return "Above both"
-    elif close < min(wma50, wma200):
-        return "Below both"
+    if close > max(wma50, wma200): return "Above both"
+    if close < min(wma50, wma200): return "Below both"
     return "Between"
 
-# -------------------------- Supabase helpers ----------------
+# ---------- Supabase helpers ----------
 def get_latest_dates_from_supabase() -> dict[str, str]:
-    """
-    Returns { 'BTC': 'YYYY-MM-DD', ... } for coins present in coin_wma.
-    Used to decide which days to fetch incrementally.
-    """
+    """{coin: 'YYYY-MM-DD'} for last date per coin."""
     try:
         resp = supabase.table("coin_wma").select("coin,date").execute()
         rows = resp.data or []
         df = pd.DataFrame(rows)
-        if df.empty:
-            return {}
+        if df.empty: return {}
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
-        latest = df.sort_values(["coin", "date"]).groupby("coin").tail(1)
+        latest = df.sort_values(["coin","date"]).groupby("coin").tail(1)
         return {row["coin"]: row["date"].date().isoformat() for _, row in latest.iterrows()}
     except Exception as e:
         print("Could not load latest dates from Supabase:", e)
         return {}
+
+def get_row_count_from_supabase(coin: str) -> int:
+    """How many rows we already have for this coin? (used to auto-backfill if < 220)"""
+    try:
+        # Lightweight count: select primary keys only
+        resp = supabase.table("coin_wma").select("date", count="exact").eq("coin", coin).execute()
+        return int(getattr(resp, "count", 0) or 0)
+    except Exception:
+        return 0
 
 def clean_for_json(df: pd.DataFrame) -> pd.DataFrame:
     for col in df.select_dtypes(include=[np.number]).columns:
@@ -195,69 +188,62 @@ def to_native_types(rows: list[dict]) -> list[dict]:
                         else v) for k, v in r.items()})
     return out
 
-# -------------------------- Incremental date planning -------
-def dates_to_fetch_for_coin(coin: str, latest_map: dict[str, str], backfill_days: int = 220) -> list[date]:
+# ---------- Incremental date planning ----------
+def dates_to_fetch_for_coin(coin: str, latest_map: dict[str, str], backfill_days: int = MIN_ROWS_FOR_WMA200) -> list[date]:
     """
-    If coin has data: fetch from (last_date+1) .. today (Europe/Istanbul).
-    Else: backfill last `backfill_days` days (enough for WMA200).
+    If the coin has < backfill_days rows total, fetch the last `backfill_days` local days.
+    Else, fetch from (last_date+1) to today.
     """
     today_local = datetime.now(tz=IST).date()
+    current_rows = get_row_count_from_supabase(coin)
+
+    # Not enough history → backfill a rolling window
+    if current_rows < backfill_days:
+        start = today_local - pd.Timedelta(days=backfill_days - 1)
+        return pd.date_range(start, today_local, freq="D").date.tolist()
+
+    # Enough history → just the missing recent days
     if coin in latest_map:
         last = pd.to_datetime(latest_map[coin]).date()
         start = last + pd.Timedelta(days=1)
         if start > today_local:
             return []
         return pd.date_range(start, today_local, freq="D").date.tolist()
-    # No history → initial backfill
+
+    # Fallback (shouldn't happen if current_rows logic above fired)
     start = today_local - pd.Timedelta(days=backfill_days - 1)
     return pd.date_range(start, today_local, freq="D").date.tolist()
 
-# -------------------------- Per-coin fetch (hourly→noon) ---
+# ---------- Hourly → noon for a set of dates ----------
 def get_noon_series_for_dates_hourly(symbol: str, dates_local: list[date]) -> pd.DataFrame | None:
-    """
-    For a given symbol and list of *local Istanbul* dates, fetch hourly klines covering
-    that period and convert to noon-close series (closest hourly candle to 12:00).
-    We fetch a single continuous hourly range covering [min(dates)-2d, max(dates)+1d]
-    to minimize API calls, then resample to noon per day and select the dates we need.
-    """
-    if not dates_local:
-        return None
+    if not dates_local: return None
     pair = f"{symbol}USDT"
 
-    d_min = min(dates_local)
-    d_max = max(dates_local)
-    # Fetch a generous hourly window around the needed dates
+    d_min, d_max = min(dates_local), max(dates_local)
     start_local = datetime(d_min.year, d_min.month, d_min.day, 0, 0, tzinfo=IST) - pd.Timedelta(days=2)
     end_local   = datetime(d_max.year, d_max.month, d_max.day, 23, 59, tzinfo=IST) + pd.Timedelta(days=1)
-
-    start_utc = start_local.astimezone(timezone.utc)
-    end_utc   = end_local.astimezone(timezone.utc)
-    start_ms = int(start_utc.timestamp() * 1000)
-    end_ms   = int(end_utc.timestamp() * 1000)
+    start_ms = int(start_local.astimezone(timezone.utc).timestamp() * 1000)
+    end_ms   = int(end_local.astimezone(timezone.utc).timestamp() * 1000)
 
     raw = fetch_hourly_klines(pair, start_ms, end_ms)
-    if not raw:
-        return None
+    if not raw: return None
 
-    cols = ["open_time","open","high","low","close","volume","close_time",
-            "qav","num_trades","taker_base","taker_quote","ignore"]
+    cols = ["open_time","open","high","low","close","volume","close_time","qav","num_trades","taker_base","taker_quote","ignore"]
     df = pd.DataFrame(raw, columns=cols)
     df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
     df["close"] = pd.to_numeric(df["close"], errors="coerce")
     df = df.dropna(subset=["open_time","close"])
 
     daily = hourly_to_noon_daily_close(df)
-    if daily is None or daily.empty:
-        return None
+    if daily is None or daily.empty: return None
 
-    # Keep only needed dates
     mask = daily["date"].dt.date.isin(dates_local)
     out = daily.loc[mask].copy().sort_values("date").reset_index(drop=True)
     return out if not out.empty else None
 
-# -------------------------- Main pipeline ------------------
+# ---------- Main ----------
 def run_pipeline():
-    # 1) Must-have bases (normalized)
+    # Must-have list
     must_have_raw = [
         "BTC","ETH","XRP","BNB","SOL","DOGE","TRX","ADA",
         "HYPE","XLM","SUI","LINK","BCH","HBAR","AVAX","TON",
@@ -270,43 +256,37 @@ def run_pipeline():
 
     must_have = [norm(s) for s in must_have_raw]
 
-    # 2) Add extra bases from CoinGecko to fill to 30
+    # Fill to 30
     bases_extra = get_top_symbols_for_headroom(limit=200)
     all_bases = must_have + [b for b in bases_extra if b not in must_have]
-
-    # 3) Map to Binance tradable USDT pairs
     pairs_all = map_to_valid_pair(all_bases, "USDT")
-    listed_pairs_set = set(pairs_all)
-    missing_must = [b for b in must_have if f"{b}USDT" not in listed_pairs_set]
+    missing_must = [b for b in must_have if f"{b}USDT" not in set(pairs_all)]
     if missing_must:
         print("Must-have symbols NOT available on Binance (skipped):", missing_must)
-
     pairs = pairs_all[:30]
     print(f"✅ Tradable Binance pairs (up to 30, must-haves first): {pairs}")
 
-    # 4) Incremental plan: which days do we need per coin?
     latest_map = get_latest_dates_from_supabase()
     all_rows: list[dict] = []
 
     for pair in pairs:
         sym = pair.replace("USDT", "")
         try:
-            need_dates = dates_to_fetch_for_coin(sym, latest_map, backfill_days=220)
+            need_dates = dates_to_fetch_for_coin(sym, latest_map, backfill_days=MIN_ROWS_FOR_WMA200)
             if not need_dates:
                 print(f"{sym}: up to date; skipping.")
                 continue
 
-            # Get hourly -> noon series for only the needed dates (with a padded fetch range)
             daily_new = get_noon_series_for_dates_hourly(sym, need_dates)
             if daily_new is None or daily_new.empty:
                 print(f"{sym}: no data for needed dates; skipping.")
                 continue
 
-            # Pull prior window from Supabase (up to 199 days) to compute proper WMAs
+            # Pull prior window to make WMAs correct around the boundary
             try:
                 prev_start = (min(need_dates) - pd.Timedelta(days=199)).isoformat()
                 resp_prev = supabase.table("coin_wma")\
-                    .select("date,close,position")\
+                    .select("date,close")\
                     .eq("coin", sym)\
                     .gte("date", prev_start)\
                     .order("date")\
@@ -323,30 +303,24 @@ def run_pipeline():
                 print(f"{sym}: could not load prior window from Supabase: {e}")
                 daily = daily_new
 
-            # Compute indicators (strict windows)
-            daily["WMA_50"]  = daily["close"].rolling(window=50,  min_periods=50).apply(lambda s: wma(s, 50),  raw=False)
-            daily["WMA_200"] = daily["close"].rolling(window=200, min_periods=200).apply(lambda s: wma(s, 200), raw=False)
+            # Indicators
+            daily["WMA_50"]  = daily["close"].rolling(50,  min_periods=50).apply(lambda s: wma(s, 50),  raw=False)
+            daily["WMA_200"] = daily["close"].rolling(200, min_periods=200).apply(lambda s: wma(s, 200), raw=False)
             daily["Position"] = daily.apply(lambda r: classify_position(r["close"], r["WMA_50"], r["WMA_200"]), axis=1)
             daily["Previous_Position"] = daily["Position"].shift(1)
 
-            # Only upsert the rows for need_dates
+            # Only the new dates get upserted
             mask_new = daily["date"].dt.date.isin(need_dates)
             out = daily.loc[mask_new, ["date","close","WMA_50","WMA_200","Position","Previous_Position"]].copy()
             out["coin"] = sym
             out["date"] = pd.to_datetime(out["date"]).dt.date.astype(str)
-            out = out.rename(columns={
-                "WMA_50": "wma_50",
-                "WMA_200": "wma_200",
-                "Position": "position",
-                "Previous_Position": "previous_position",
-            })
+            out = out.rename(columns={"WMA_50": "wma_50", "WMA_200": "wma_200",
+                                      "Position": "position", "Previous_Position": "previous_position"})
             out = clean_for_json(out)
-            batch_rows = to_native_types(out.to_dict(orient="records"))
-            all_rows.extend(batch_rows)
+            all_rows.extend(to_native_types(out.to_dict(orient="records")))
 
-            # Alert only if the latest day we just fetched changed position vs prior day
-            # Use the combined 'daily' frame (prev + new)
-            if len(daily) >= 2 and daily.iloc[-1]["date"].date() in need_dates:
+            # Alert only if the last row we inserted is today's (or latest needed) and it changed
+            if len(daily) >= 2 and daily.iloc[-1]["date"].dt.tz_localize(None).date() in need_dates:
                 prev, latest = daily.iloc[-2], daily.iloc[-1]
                 if latest["Position"] != prev["Position"]:
                     msg = f"{sym} changed position: {prev['Position']} → {latest['Position']}\nClose: {latest['close']}"
@@ -359,21 +333,17 @@ def run_pipeline():
         print("Nothing new to upload — all up to date.")
         return
 
-    # 5) Upsert (dedupe batch on (coin,date))
+    # Upsert
     try:
         dedup = {}
         for r in all_rows:
             dedup[(r["coin"], r["date"])] = r
         all_rows = list(dedup.values())
-
         print(f"⬆️ Upserting {len(all_rows)} rows to Supabase…")
-        supabase.table("coin_wma").upsert(
-            all_rows, on_conflict="coin,date", returning="minimal"
-        ).execute()
+        supabase.table("coin_wma").upsert(all_rows, on_conflict="coin,date", returning="minimal").execute()
         print("✅ Supabase upsert complete")
     except Exception as e:
         print("❌ Supabase upload failed:", e)
 
-# -------------------------- Entrypoint ----------------------
 if __name__ == "__main__":
     run_pipeline()
