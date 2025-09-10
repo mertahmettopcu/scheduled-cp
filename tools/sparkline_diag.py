@@ -1,78 +1,75 @@
 #!/usr/bin/env python3
-"""
-sparkline_diag.py
-
-Print per-coin diagnostics for the dashboard sparkline (last 30 days).
-This runs in CI and writes to STDOUT so you can see it in the Actions logs.
-
-Env:
-  SUPABASE_URL, SUPABASE_KEY
-"""
-
 import os
 import sys
-import numpy as np
+from datetime import datetime
 import pandas as pd
 from supabase import create_client
 
-SPARK_DAYS = 30
+# Env
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+SPARK_DAYS = int(os.getenv("SPARK_DAYS", "30"))
+MIN_REQUIRED_POINTS = int(os.getenv("MIN_REQUIRED_POINTS", "10"))
+WARN_ONLY = os.getenv("WARN_ONLY", "0") == "1"
+
+if not SUPABASE_URL or not SUPABASE_KEY:
+    print("❌ Missing SUPABASE_URL or SUPABASE_KEY", flush=True)
+    sys.exit(1)
+
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+def fetch_latest_snapshot() -> pd.DataFrame:
+    r = supabase.table("coin_wma_latest").select("*").execute()
+    df = pd.DataFrame(r.data or [])
+    if not df.empty and "date" in df.columns:
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    return df
+
+def fetch_history() -> pd.DataFrame:
+    r = supabase.table("coin_wma").select("coin,date,close").execute()
+    df = pd.DataFrame(r.data or [])
+    if not df.empty:
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+        df["close"] = pd.to_numeric(df["close"], errors="coerce")
+    return df
 
 def main():
-    url = os.getenv("SUPABASE_URL")
-    key = os.getenv("SUPABASE_KEY")
-    if not url or not key:
-        print("ERROR: SUPABASE_URL or SUPABASE_KEY is missing in environment.", file=sys.stderr)
-        sys.exit(2)
+    print(f"▶ Sparkline diagnostics | SPARK_DAYS={SPARK_DAYS} | MIN_REQUIRED_POINTS={MIN_REQUIRED_POINTS} | WARN_ONLY={WARN_ONLY}")
+    latest = fetch_latest_snapshot()
+    hist = fetch_history()
 
-    supabase = create_client(url, key)
+    if latest.empty:
+        print("❌ coin_wma_latest is empty. Did the pipeline run?", flush=True)
+        sys.exit(1 if not WARN_ONLY else 0)
 
-    # Pull only what we need
-    resp = supabase.table("coin_wma").select("coin,date,close").execute()
-    rows = resp.data or []
-    if not rows:
-        print("No rows in coin_wma. Nothing to diagnose.")
-        return
+    if hist.empty:
+        print("❌ coin_wma is empty. No history to plot.", flush=True)
+        sys.exit(1 if not WARN_ONLY else 0)
 
-    df = pd.DataFrame(rows)
-    df["date"]  = pd.to_datetime(df["date"], errors="coerce")
-    df["close"] = pd.to_numeric(df["close"], errors="coerce")
-    df = df.dropna(subset=["coin", "date"]).sort_values(["coin", "date"])
+    latest_coins = sorted(latest["coin"].astype(str).unique().tolist())
+    hist = hist.sort_values(["coin", "date"]).dropna(subset=["close"])
 
-    print("\n===== Sparkline diagnostics (last 30d) =====")
-    bad = 0
-
-    for coin in df["coin"].dropna().unique():
-        g = df[df["coin"] == coin]
-        hist_rows = int(len(g))
-        last_hist_date = g["date"].max()
-
-        s = g[["date", "close"]].dropna().sort_values("date")
-        y = pd.to_numeric(s["close"], errors="coerce").replace([np.inf, -np.inf], np.nan)
-
-        recent = y.tail(SPARK_DAYS)
-        recent = recent.interpolate(limit_direction="both").ffill().bfill()
-        finite = np.isfinite(recent.to_numpy(dtype=float))
-        finite_recent = int(finite.sum())
-        recent_rows = int(len(recent))
-
-        if finite_recent == 0:
-            status = "NO_DATA"
-            reason = "no finite closes in last 30d"
-            bad += 1
+    missing = []
+    for coin in latest_coins:
+        sub = hist.loc[hist["coin"] == coin]
+        # We expect at least MIN_REQUIRED_POINTS in the last SPARK_DAYS rows
+        tail = sub.tail(SPARK_DAYS)
+        n = len(tail.index)
+        if n < MIN_REQUIRED_POINTS:
+            missing.append((coin, n))
+            print(f"⚠️  {coin}: only {n} points (need ≥ {MIN_REQUIRED_POINTS})")
         else:
-            status = "OK"
-            reason = ""
+            # Optional sanity: last point should be recent-ish compared to latest snapshot for that coin
+            latest_date = latest.loc[latest["coin"] == coin, "date"].max()
+            hist_last = tail["date"].max() if not tail.empty else None
+            print(f"✅ {coin}: {n} points | latest hist={hist_last} | latest snap={latest_date}")
 
-        print(f"{coin:6s} | hist_rows={hist_rows:4d} "
-              f"| last={last_hist_date.date() if pd.notnull(last_hist_date) else '—'} "
-              f"| recent={recent_rows:2d} | finite_recent={finite_recent:2d} "
-              f"| {status} {('('+reason+')') if reason else ''}")
+    if missing:
+        msg = f"❌ {len(missing)} coin(s) missing enough sparkline points: " + ", ".join(f"{c}({n})" for c, n in missing)
+        print(msg, flush=True)
+        sys.exit(0 if WARN_ONLY else 1)
 
-    if bad:
-        print(f"\nSummary: {bad} coin(s) have NO_DATA in last 30d.")
-    else:
-        print("\nSummary: All coins have finite data for the last 30d.")
+    print("✅ All sparkline requirements satisfied.", flush=True)
 
 if __name__ == "__main__":
-    os.environ["PYTHONUNBUFFERED"] = "1"
     main()
