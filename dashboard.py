@@ -1,12 +1,17 @@
 import os
 import re
+import io
+import numpy as np
 import pandas as pd
 import streamlit as st
+import matplotlib.pyplot as plt
 from supabase import create_client
 
 st.set_page_config(page_title="Crypto WMA Dashboard", layout="wide")
 
 SPARK_DAYS = 30  # days for sparkline
+TREND_STYLE = "regression"  # "regression" or "wma"
+WMA_WINDOW = 10             # only used when TREND_STYLE == "wma"
 
 # -------------------- Supabase creds --------------------
 def _read_supabase_creds():
@@ -50,6 +55,58 @@ def load_data():
     df_hist = pd.DataFrame(hist.data or [])
     return df_latest, df_hist
 
+# -------------------- Tiny chart helpers --------------------
+def _wma(values: np.ndarray, window: int) -> np.ndarray:
+    if window <= 1 or len(values) < window:
+        return np.full_like(values, np.nan, dtype=float)
+    weights = np.arange(1, window + 1, dtype=float)
+    out = np.full(values.shape[0], np.nan, dtype=float)
+    for i in range(window - 1, len(values)):
+        seg = values[i - window + 1 : i + 1]
+        if np.isnan(seg).any():
+            continue
+        out[i] = (seg * weights).sum() / weights.sum()
+    return out
+
+def make_spark_with_trend(y: np.ndarray) -> bytes | None:
+    """Return a tiny PNG (bytes) of close line + trend line."""
+    y = y.astype(float)
+    y = y[~np.isnan(y)]
+    if y.size < 2:
+        return None
+
+    x = np.arange(len(y))
+
+    # figure size tuned so the image looks like the built-in spark
+    fig, ax = plt.subplots(figsize=(2.6, 0.7), dpi=150)
+    # price line
+    ax.plot(x, y, color="red", linewidth=1)
+
+    # overlay trend
+    if TREND_STYLE == "regression":
+        # simple linear regression trend
+        coeffs = np.polyfit(x, y, 1)
+        trend = np.polyval(coeffs, x)
+    else:  # TREND_STYLE == "wma"
+        trend = _wma(y, min(WMA_WINDOW, len(y)))
+
+    # only plot trend where it exists
+    if np.isfinite(trend).any():
+        ax.plot(x[np.isfinite(trend)], trend[np.isfinite(trend)],
+                color="black", linewidth=1, linestyle="--")
+
+    # clean look
+    ax.axis("off")
+    # ensure a tight layout to remove margins
+    plt.tight_layout(pad=0)
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", bbox_inches="tight", pad_inches=0, transparent=True)
+    plt.close(fig)
+    buf.seek(0)
+    return buf.getvalue()
+
+# -------------------- UI --------------------
 st.title("📈 Crypto WMA Dashboard")
 
 df_latest, df_hist = load_data()
@@ -71,8 +128,8 @@ c1, c2 = st.columns(2)
 c1.metric("Coins shown", f"{coins_shown}")
 c2.metric("Last updated (UTC)", last_dt.strftime("%Y-%m-%d") if pd.notnull(last_dt) else "—")
 
-# Build per-coin trend from the last SPARK_DAYS rows (no global cutoff)
-trend = None
+# Build per-coin spark images from the last SPARK_DAYS rows
+spark_df = None
 if not df_hist.empty:
     df_hist["date"] = pd.to_datetime(df_hist["date"], errors="coerce")
     df_hist["close"] = pd.to_numeric(df_hist["close"], errors="coerce")
@@ -85,18 +142,17 @@ if not df_hist.empty:
                .dropna(subset=["close"])
     )
 
-    # pack into lists for st.column_config.LineChartColumn
-    trend = (
+    # turn each coin's last N closes into a tiny PNG with trend overlay
+    imgs = (
         tailn.groupby("coin")["close"]
-             .apply(lambda s: [float(x) for x in s.tolist()])
-             .rename("trend")
+             .apply(lambda s: make_spark_with_trend(s.to_numpy()))
+             .rename("spark")
              .reset_index()
     )
 
+    spark_df = imgs
     # merge onto latest snapshot
-    df_latest = df_latest.merge(trend, on="coin", how="left")
-
-
+    df_latest = df_latest.merge(spark_df, on="coin", how="left")
 
 # status (Change if position != previous_position)
 def status_badge(row):
@@ -107,7 +163,7 @@ def status_badge(row):
 df_latest["status"] = df_latest.apply(status_badge, axis=1)
 
 # Display
-cols = ["coin","date","close","wma_50","wma_200","position","previous_position","status","trend"]
+cols = ["coin","date","close","wma_50","wma_200","position","previous_position","status","spark"]
 st.subheader("Latest WMA snapshot per coin")
 st.dataframe(
     df_latest[cols].sort_values("coin").reset_index(drop=True),
@@ -117,7 +173,6 @@ st.dataframe(
         "close": st.column_config.NumberColumn(format="%.6f"),
         "wma_50": st.column_config.NumberColumn(format="%.6f"),
         "wma_200": st.column_config.NumberColumn(format="%.6f"),
-        # slimmer sparkline
-        "trend": st.column_config.LineChartColumn("trend (last 30d)", width="small"),
+        "spark": st.column_config.ImageColumn("trend (last 30d)", width="small"),
     },
 )
