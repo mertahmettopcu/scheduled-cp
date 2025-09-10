@@ -133,6 +133,11 @@ jobs:
           PYTHONUNBUFFERED: "1"
         run: python -u crypto_pipeline_with_telegram.py
 
+      - name: Sparkline diagnostics (prints to logs only)
+        run: python sparkline_diag.py
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
 
 
       - name: Disconnect OpenVPN
