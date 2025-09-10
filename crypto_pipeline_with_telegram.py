@@ -9,10 +9,10 @@ import requests
 from supabase import create_client, Client
 
 # -------------------- Config --------------------
-DAYS_BACK = 260
+DAYS_BACK = 420
 NOON_TZ = "Europe/Istanbul"
 BINANCE_API = "https://api.binance.com"
-SAVE_LAST_N_DAYS = 220
+SAVE_LAST_N_DAYS = 365
 REQUEST_TIMEOUT = 20
 
 MUST_HAVE_BASES = [
@@ -255,7 +255,8 @@ def run():
     log("✅ Supabase upsert complete")
 
     max_dt = max(latest_dates.values()) if latest_dates else "—"
-    log(f"Coins updated: {len(latest_dates)} | Most recent date: {max_dt} | Telegram alerts: {alerts}")
+    log(f"Coins updated: {len(latest_dates)} | Most recent date (Istanbul noon): {max_dt} | Telegram alerts: {alerts}")
+
 
 if __name__ == "__main__":
     os.environ["PYTHONUNBUFFERED"] = "1"
