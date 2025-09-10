@@ -71,18 +71,32 @@ c1, c2 = st.columns(2)
 c1.metric("Coins shown", f"{coins_shown}")
 c2.metric("Last updated (UTC)", last_dt.strftime("%Y-%m-%d") if pd.notnull(last_dt) else "—")
 
-# Build sparkline from recent history
+# Build per-coin trend from the last SPARK_DAYS rows (no global cutoff)
 trend = None
 if not df_hist.empty:
     df_hist["date"] = pd.to_datetime(df_hist["date"], errors="coerce")
     df_hist["close"] = pd.to_numeric(df_hist["close"], errors="coerce")
-    cutoff = df_hist["date"].max() - pd.Timedelta(days=SPARK_DAYS)
-    recent = df_hist[df_hist["date"] >= cutoff].sort_values(["coin","date"])
-    trend = (recent.groupby("coin")["close"]
+
+    # sort and take last N per coin
+    tailn = (
+        df_hist.sort_values(["coin", "date"])
+               .groupby("coin", as_index=False, group_keys=False)
+               .tail(SPARK_DAYS)
+               .dropna(subset=["close"])
+    )
+
+    # pack into lists for st.column_config.LineChartColumn
+    trend = (
+        tailn.groupby("coin")["close"]
              .apply(lambda s: [float(x) for x in s.tolist()])
              .rename("trend")
-             .reset_index())
+             .reset_index()
+    )
+
+    # merge onto latest snapshot
     df_latest = df_latest.merge(trend, on="coin", how="left")
+
+
 
 # status (Change if position != previous_position)
 def status_badge(row):
