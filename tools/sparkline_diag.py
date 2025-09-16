@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 import os
 import sys
-import requests
 import pandas as pd
 from datetime import datetime
 from supabase import create_client
+
+# ---- Early banner so we always see something ----
+print("▶ Starting sparkline_diag.py bootstrap…", flush=True)
 
 # Env
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -17,7 +19,7 @@ REQUEST_TIMEOUT = 20
 
 if not SUPABASE_URL or not SUPABASE_KEY:
     print("❌ Missing SUPABASE_URL or SUPABASE_KEY", flush=True)
-    sys.exit(1)
+    sys.exit(1 if not WARN_ONLY else 0)
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
@@ -57,31 +59,32 @@ def fetch_history_paged() -> pd.DataFrame:
         df["close"] = pd.to_numeric(df["close"], errors="coerce")
     return df
 
-# ---------- Binance check ----------
+# ---------- Binance check (optional; never blocks) ----------
 def get_trading_spot_symbols() -> set:
     try:
+        import requests  # lazy import so missing dependency won't crash the script
         r = requests.get(f"{BINANCE_API}/api/v3/exchangeInfo", timeout=REQUEST_TIMEOUT)
         r.raise_for_status()
         info = r.json()
         return {s["symbol"] for s in info.get("symbols", []) if s.get("status") == "TRADING"}
     except Exception as e:
-        print(f"ℹ️ Could not fetch Binance symbols: {e}", flush=True)
+        print(f"ℹ️ Skipping Binance pair check (non-fatal): {e}", flush=True)
         return set()
 
 def main():
-    print(f"▶ Sparkline diagnostics | SPARK_DAYS={SPARK_DAYS} | MIN_REQUIRED_POINTS={MIN_REQUIRED_POINTS} | WARN_ONLY={WARN_ONLY}")
-    latest = fetch_latest_snapshot()
-    hist = fetch_history_paged()
+    print(f"▶ Sparkline diagnostics | SPARK_DAYS={SPARK_DAYS} | MIN_REQUIRED_POINTS={MIN_REQUIRED_POINTS} | WARN_ONLY={WARN_ONLY}", flush=True)
 
+    latest = fetch_latest_snapshot()
     if latest.empty:
         print("❌ coin_wma_latest is empty. Did the pipeline run?", flush=True)
         sys.exit(1 if not WARN_ONLY else 0)
 
+    hist = fetch_history_paged()
     if hist.empty:
         print("❌ coin_price_daily is empty. No history to plot.", flush=True)
         sys.exit(1 if not WARN_ONLY else 0)
 
-    spot_syms = get_trading_spot_symbols()  # for pair-existence hints
+    spot_syms = get_trading_spot_symbols()  # empty set if check skipped
 
     latest_coins = sorted(latest["coin"].astype(str).unique().tolist())
     hist = hist.sort_values(["coin", "date"]).dropna(subset=["close"])
@@ -102,29 +105,23 @@ def main():
         latest_date = latest.loc[latest["coin"] == coin, "date"].max()
         hist_last = tail["date"].max() if not tail.empty else None
 
-        # helper facts
         total_rows = int(counts.loc[counts["coin"] == coin, "n_rows"].iloc[0]) if (counts["coin"] == coin).any() else 0
         last_hist_any = counts.loc[counts["coin"] == coin, "last_hist"].iloc[0] if (counts["coin"] == coin).any() else None
+
         pair = f"{coin.upper()}USDT"
-        pair_exists = pair in spot_syms if spot_syms else None  # None if we couldn't fetch
+        pair_exists = (pair in spot_syms) if spot_syms else None  # None if we skipped the check
 
         if n < MIN_REQUIRED_POINTS:
             missing.append((coin, n))
             reason_bits = []
-            if total_rows == 0:
-                reason_bits.append("no rows in coin_price_daily")
-            else:
-                reason_bits.append(f"{total_rows} total rows; last_hist={last_hist_any}")
-            if pair_exists is True:
-                reason_bits.append(f"pair {pair} exists on Binance")
-            elif pair_exists is False:
-                reason_bits.append(f"pair {pair} NOT on Binance")
-            else:
-                reason_bits.append("Binance pair unknown")
+            reason_bits.append("no rows in coin_price_daily" if total_rows == 0 else f"{total_rows} total rows; last_hist={last_hist_any}")
+            if pair_exists is True:  reason_bits.append(f"pair {pair} exists on Binance")
+            if pair_exists is False: reason_bits.append(f"pair {pair} NOT on Binance")
+            if pair_exists is None:  reason_bits.append("Binance pair unknown (check skipped)")
             reason = " | ".join(reason_bits)
-            print(f"⚠️  {coin}: only {n} points (need ≥ {MIN_REQUIRED_POINTS}) — {reason}")
+            print(f"⚠️  {coin}: only {n} points (need ≥ {MIN_REQUIRED_POINTS}) — {reason}", flush=True)
         else:
-            print(f"✅ {coin}: {n} points | latest hist={hist_last} | latest snap={latest_date}")
+            print(f"✅ {coin}: {n} points | latest hist={hist_last} | latest snap={latest_date}", flush=True)
 
     if missing:
         msg = f"❌ {len(missing)} coin(s) missing enough sparkline points: " + ", ".join(f"{c}({n})" for c, n in missing)
@@ -134,4 +131,11 @@ def main():
     print("✅ All sparkline requirements satisfied.", flush=True)
 
 if __name__ == "__main__":
+    # ensure unbuffered output even if CI forgets PYTHONUNBUFFERED
+    try:
+        import sys as _sys
+        _sys.stdout.reconfigure(line_buffering=True)
+        _sys.stderr.reconfigure(line_buffering=True)
+    except Exception:
+        pass
     main()
