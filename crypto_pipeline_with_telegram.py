@@ -107,37 +107,62 @@ def select_pairs(must_have: List[str], take_total: int = 30) -> List[str]:
     log(f"✅ Tradable pairs (up to {take_total}, must-haves first): {pairs[:take_total]}")
     return pairs[:take_total]
 
+# -------------------- Robust hourly fetch --------------------
 def fetch_hourly(pair: str, start_ms: int, end_ms: int) -> List[List]:
+    """
+    Hardened:
+      - Retries on HTTP/network errors
+      - Gentle backoff on 429/5xx
+      - Continues paging until end_ms
+    """
     out: List[List] = []
     curr = start_ms
-    backoff = 0.25
     while curr < end_ms:
         hours = int((end_ms - curr) / (3600 * 1000)) + 1
         limit = max(1, min(1000, hours))
         params = {"symbol": pair, "interval": "1h", "startTime": curr, "endTime": end_ms, "limit": limit}
-        try:
-            r = requests.get(f"{BINANCE_API}/api/v3/klines", params=params, timeout=REQUEST_TIMEOUT)
-            if r.status_code == 429:
-                time.sleep(backoff)
-                backoff = min(backoff * 2, 4.0)
-                continue
-            r.raise_for_status()
-            data = r.json()
-            if not data:
+
+        # per-request retry
+        attempt = 0
+        backoff = 0.25
+        while True:
+            attempt += 1
+            try:
+                r = requests.get(f"{BINANCE_API}/api/v3/klines", params=params, timeout=REQUEST_TIMEOUT)
+                if r.status_code in (429, 418, 451) or 500 <= r.status_code < 600:
+                    time.sleep(backoff)
+                    backoff = min(backoff * 2, 5.0)
+                    if attempt < 6:
+                        continue
+                r.raise_for_status()
+                data = r.json()
                 break
-            out.extend(data)
-            last_open = data[-1][0]
-            if last_open <= curr:  # safety
+            except Exception as e:
+                if attempt < 6:
+                    time.sleep(backoff)
+                    backoff = min(backoff * 2, 5.0)
+                    continue
+                log(f"❌ fetch_hourly {pair} failed after {attempt} attempts: {e}")
+                data = []
                 break
-            curr = last_open + 3600 * 1000
-            time.sleep(0.12)
-        except Exception as e:
-            log(f"❌ fetch_hourly {pair}: {e}")
+
+        if not data:
             break
+
+        out.extend(data)
+        last_open = data[-1][0]
+        if last_open <= curr:  # safety
+            break
+        curr = last_open + 3600 * 1000
+        time.sleep(0.08)  # be nice to the API
+
     return out
 
 # -------------------- Transform --------------------
 def hourly_to_noon_istanbul(hourly_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Pick the hourly close nearest to 12:00 (Istanbul) for each calendar day.
+    """
     df = hourly_df.copy()
     df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
     local = df["open_time"].dt.tz_convert(NOON_TZ)
@@ -146,6 +171,26 @@ def hourly_to_noon_istanbul(hourly_df: pd.DataFrame) -> pd.DataFrame:
     idx = df.groupby("local_date")["h_diff"].idxmin()
     d = df.loc[idx, ["open_time", "close", "local_date"]].copy()
     d["date"] = pd.to_datetime(d["local_date"])
+    d = d.sort_values("date").reset_index(drop=True)
+    return d[["date", "close"]]
+
+def daily_fallback_last_close(hourly_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Fallback if noon-selector yields empty:
+      - Convert to Istanbul tz
+      - Group by calendar day
+      - Take the LAST available hourly close in that day
+    """
+    df = hourly_df.copy()
+    if df.empty:
+        return df
+    df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
+    local = df["open_time"].dt.tz_convert(NOON_TZ)
+    df["local_date"] = pd.to_datetime(local.dt.date)
+    df = df.sort_values("open_time")
+    # last close per local_date
+    last_idx = df.groupby("local_date")["open_time"].idxmax()
+    d = df.loc[last_idx, ["local_date", "close"]].rename(columns={"local_date": "date"})
     d = d.sort_values("date").reset_index(drop=True)
     return d[["date", "close"]]
 
@@ -189,6 +234,7 @@ def build_daily_for_symbol(base: str, days_back: int) -> Optional[pd.DataFrame]:
     pair = f"{base}USDT"
     raw = fetch_hourly(pair, start_ms, end_ms)
     if not raw:
+        log(f"  └─ no hourly data returned for {base} (pair {pair})")
         return None
 
     cols = ["open_time","open","high","low","close","volume","close_time","qav","num_trades","taker_base","taker_quote","ignore"]
@@ -197,29 +243,37 @@ def build_daily_for_symbol(base: str, days_back: int) -> Optional[pd.DataFrame]:
     df["close"] = pd.to_numeric(df["close"], errors="coerce")
     df = df.dropna(subset=["close"])
 
+    # Primary daily (noon Istanbul)
     daily = hourly_to_noon_istanbul(df)
+
+    # Fallback daily if noon-selection yields empty (sparse/new listings)
     if daily.empty:
+        daily = daily_fallback_last_close(df)
+
+    if daily.empty:
+        log(f"  └─ still empty daily for {base} after fallback")
         return None
 
     daily = daily.sort_values("date").reset_index(drop=True)
-    
-    # Upsert raw daily closes for sparklines (no WMA filter)
+
+    # ---------- Raw closes upsert for sparklines (ALWAYS before WMA) ----------
     raw_out = daily[["date", "close"]].copy()
     raw_out["coin"] = base
     raw_out["date"] = pd.to_datetime(raw_out["date"]).dt.date.astype(str)
-    
-    # JSON-safe rows
-    raw_rows = []
-    for r in raw_out.to_dict(orient="records"):
-        r["close"] = float(r["close"])
-        raw_rows.append(r)
-    
-    # Upsert raw history
+
+    raw_rows = [{"coin": r["coin"], "date": r["date"], "close": float(r["close"])} for r in raw_out.to_dict(orient="records")]
+
     if raw_rows:
-        supabase.table("coin_price_daily") \
-            .upsert(raw_rows, on_conflict="coin,date", returning="minimal") \
-            .execute()
-    # WMA calculation    
+        try:
+            supabase.table("coin_price_daily") \
+                .upsert(raw_rows, on_conflict="coin,date", returning="minimal") \
+                .execute()
+            # helpful log for CI triage
+            log(f"  └─ upserted {len(raw_rows)} raw daily rows for {base}; last={raw_rows[-1]['date']}")
+        except Exception as e:
+            log(f"  └─ ❌ failed raw upsert for {base}: {e}")
+
+    # ---------- WMA calculation ----------
     daily["wma_50"]  = daily["close"].rolling(window=50,  min_periods=50 ).apply(lambda s: wma(s, 50),  raw=False)
     daily["wma_200"] = daily["close"].rolling(window=200, min_periods=200).apply(lambda s: wma(s, 200), raw=False)
     daily["position"] = daily.apply(lambda r: classify(r["close"], r["wma_50"], r["wma_200"]), axis=1)
