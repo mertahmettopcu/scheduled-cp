@@ -5,12 +5,15 @@ import base64
 import numpy as np
 import pandas as pd
 import streamlit as st
+import matplotlib
+matplotlib.use("Agg")  # safe backend for headless environments
 import matplotlib.pyplot as plt
 from supabase import create_client
 
 st.set_page_config(page_title="Crypto WMA Dashboard", layout="wide")
 
 SPARK_DAYS = 30  # how many days to show in the small chart
+MIN_SPARK_POINTS = int(os.getenv("MIN_SPARK_POINTS", "3"))  # minimum usable points to render a sparkline
 
 # -------------------- Supabase creds --------------------
 def _read_supabase_creds():
@@ -55,9 +58,7 @@ def load_data():
     offset = 0
     hist_rows = []
 
-    # You get the most predictable results if you ORDER before you RANGE
-    # (PostgREST applies range after ordering).
-    # We request only the columns we need.
+    # Order before range; request only needed columns.
     while True:
         resp = (
             supabase
@@ -73,7 +74,6 @@ def load_data():
             break
         hist_rows.extend(batch)
         offset += page_size
-        # defensive stop (in case someone removes ordering), but practically not needed
         if len(batch) < page_size:
             break
 
@@ -109,15 +109,14 @@ def _spark_with_trend_png(y: np.ndarray) -> str | None:
     - linear regression trendline (dashed, slightly thicker)
     Returns a data URI (base64 PNG) suitable for ImageColumn, or None if not enough data.
     """
-    if y is None or len(y) < 2 or np.isnan(y).all():
+    if y is None:
         return None
 
-    # Clean NaNs (drop; keep relative index spacing)
     x = np.arange(len(y))
     mask = ~np.isnan(y)
     x_masked = x[mask]
     y_masked = y[mask]
-    if len(y_masked) < 5:
+    if len(y_masked) < MIN_SPARK_POINTS:
         return None
 
     # Fit simple linear regression y = a*x + b
@@ -152,14 +151,15 @@ def _spark_with_trend_png(y: np.ndarray) -> str | None:
 def build_trend_images(df_hist: pd.DataFrame, days: int) -> pd.DataFrame:
     """
     For each coin, take its last `days` closes and build a PNG data URI
-    with sparkline + trendline. Returns a DataFrame with columns [coin, trend_img].
+    with sparkline + trendline. Returns a DataFrame with columns [coin, trend_img, n_points].
     """
     if df_hist.empty:
-        return pd.DataFrame(columns=["coin", "trend_img"])
+        return pd.DataFrame(columns=["coin", "trend_img", "n_points"])
 
     df = df_hist.copy()
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
-    df["close"] = pd.to_numeric(df["close"], errors="coerce")
+    # CLEAN: replace ±inf with NaN, then coerce
+    df["close"] = pd.to_numeric(df["close"], errors="coerce").replace([np.inf, -np.inf], np.nan)
 
     # Take last N per coin
     tailn = (
@@ -171,13 +171,23 @@ def build_trend_images(df_hist: pd.DataFrame, days: int) -> pd.DataFrame:
     images = []
     for coin, sub in tailn.groupby("coin"):
         y = sub["close"].astype(float).to_numpy()
-        img = _spark_with_trend_png(y)
-        images.append({"coin": coin, "trend_img": img})
+        n_points = int(np.sum(~np.isnan(y)))
+        img = _spark_with_trend_png(y) if n_points >= MIN_SPARK_POINTS else None
+        images.append({"coin": coin, "trend_img": img, "n_points": n_points})
     return pd.DataFrame(images)
 
 # Build trend images and merge onto snapshot
 trend_imgs = build_trend_images(df_hist, SPARK_DAYS)
 df_latest = df_latest.merge(trend_imgs, on="coin", how="left")
+
+# (optional but helpful) Show coverage so you can see why a sparkline is missing
+with st.expander("Sparkline data coverage (last 30 rows)", expanded=False):
+    coverage = (
+        df_latest[["coin", "n_points"]]
+        .sort_values("coin")
+        .rename(columns={"n_points": f"usable_points (≥{MIN_SPARK_POINTS})"})
+    )
+    st.dataframe(coverage, use_container_width=True)
 
 # status (Change if position != previous_position)
 def status_badge(row):
