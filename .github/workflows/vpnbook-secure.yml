@@ -1,6 +1,8 @@
-name: VPNBook Secure Workflow
+name: Daily Crypto Pipeline (VPN)
 
 on:
+  schedule:
+    - cron: "0 9 * * *"    # 09:00 UTC = 12:00 TRT (Istanbul noon)
   workflow_dispatch:
   push:
     branches: [ main ]
@@ -14,49 +16,44 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
       - name: Install OpenVPN
         run: |
           sudo apt-get update
           sudo apt-get install -y openvpn
           openvpn --version
 
-      # Install Python deps BEFORE VPN so mirrors aren't blocked by VPN policy
-      - name: Install Python dependencies
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
           fi
 
-      # SAFELY write the .ovpn from a secret. Base64 is safest; if you can't change now, keep plaintext.
-      # Recommended: create VPN_OVPN_B64 secret = base64 of your .ovpn (no newlines), and use this step.
       - name: Create OVPN file
         shell: bash
         env:
           VPN_OVPN_B64: ${{ secrets.VPN_OVPN_B64 }}
-          VPN_OVPN: ${{ secrets.VPN_OVPN }}  # fallback if you didn't base64 it
+          VPN_OVPN: ${{ secrets.VPN_OVPN }}
         run: |
           set -euo pipefail
           if [ -n "${VPN_OVPN_B64:-}" ]; then
             echo "$VPN_OVPN_B64" | base64 -d > vpnbook.ovpn
           elif [ -n "${VPN_OVPN:-}" ]; then
-            # Write verbatim (may break if GitHub Secrets rewraps lines)
             printf '%s' "$VPN_OVPN" > vpnbook.ovpn
           else
-            echo "::error ::Missing VPN_OVPN_B64 (preferred) or VPN_OVPN secret."
+            echo "::error ::Missing VPN_OVPN_B64 or VPN_OVPN secret."
             exit 1
           fi
-
-          # Ensure the config uses the auth file, and don't cache passwords
           grep -qi '^auth-user-pass' vpnbook.ovpn || echo 'auth-user-pass vpn-auth.txt' >> vpnbook.ovpn
-          grep -qi '^auth-nocache' vpnbook.ovpn || echo 'auth-nocache' >> vpnbook.ovpn
-
-          # (Optional but better security) verify server cert if not present
+          grep -qi '^auth-nocache' vpnbook.ovpn   || echo 'auth-nocache' >> vpnbook.ovpn
           grep -qi '^remote-cert-tls' vpnbook.ovpn || echo 'remote-cert-tls server' >> vpnbook.ovpn
-
           chmod 600 vpnbook.ovpn
 
-      # Create the auth file, but FIRST sanitize secrets (trim spaces, remove CR)
       - name: Create VPN auth
         shell: bash
         env:
@@ -64,49 +61,20 @@ jobs:
           VPN_PASS: ${{ secrets.VPN_PASS }}
         run: |
           set -euo pipefail
-
-          # Mask in logs
           echo "::add-mask::$VPN_USER"
           echo "::add-mask::$VPN_PASS"
-
-          # Normalize: remove carriage returns, trim leading/trailing spaces
-          _user=$(printf '%s' "$VPN_USER" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
-          _pass=$(printf '%s' "$VPN_PASS" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
-
-          # Basic sanity checks (length only; content stays secret)
-          if [ -z "$_user" ] || [ -z "$_pass" ]; then
-            echo "::error ::VPN_USER or VPN_PASS is empty after trimming. Recheck your secrets."
-            exit 1
-          fi
-
-          # Write exactly two lines: username, then password
-          {
-            printf '%s\n' "$_user"
-            printf '%s\n' "$_pass"
-          } > vpn-auth.txt
-
+          printf '%s\n%s\n' "$(printf '%s' "$VPN_USER" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')" \
+                             "$(printf '%s' "$VPN_PASS" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')" > vpn-auth.txt
           chmod 600 vpn-auth.txt
 
       - name: Connect to VPNBook
         shell: bash
         run: |
           set -euo pipefail
-
-          sudo openvpn \
-            --config vpnbook.ovpn \
-            --auth-user-pass vpn-auth.txt \
-            --daemon \
-            --writepid /tmp/ovpn.pid \
-            --log /tmp/ovpn.log
-
-          echo "OpenVPN started. Checking logs..."
-          sleep 2
-          sudo tail -n 50 /tmp/ovpn.log || true
-
-          echo "Waiting for connection (up to ~60s)..."
+          sudo openvpn --config vpnbook.ovpn --auth-user-pass vpn-auth.txt --daemon --writepid /tmp/ovpn.pid --log /tmp/ovpn.log
           for i in {1..30}; do
             if sudo grep -q 'AUTH_FAILED' /tmp/ovpn.log; then
-              echo "::error ::VPN login failed. VPNBook rotates passwords. Update the VPN_PASS secret with the CURRENT password."
+              echo "::error ::VPN login failed. Update VPN_PASS (VPNBook rotates)."
               sudo tail -n +1 /tmp/ovpn.log || true
               exit 1
             fi
@@ -116,15 +84,13 @@ jobs:
             fi
             sleep 2
           done
-
           if ! sudo grep -q 'Initialization Sequence Completed' /tmp/ovpn.log; then
-            echo "::error ::VPN did not connect in time. Last log lines:"
+            echo "::error ::VPN did not connect in time."
             sudo tail -n 200 /tmp/ovpn.log || true
             exit 1
           fi
 
-
-      - name: Run Python script (inside VPN)
+      - name: Run pipeline (noon snapshot + WMAs)
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
@@ -132,21 +98,6 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           PYTHONUNBUFFERED: "1"
         run: python -u crypto_pipeline_with_telegram.py
-
-      - name: Sparkline diagnostics (fail while building)
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-          # Tune these if you want:
-          SPARK_DAYS: "30"            # how many days your dashboard shows
-          MIN_REQUIRED_POINTS: "10"   # minimum points required to render a sparkline
-          WARN_ONLY: "0"              # 0 = fail job if any coin is missing, 1 = warn only
-          PYTHONUNBUFFERED: "1"       # unbuffered stdout/stderr so we see logs in CI
-        run: |
-          set -euo pipefail
-          python -X faulthandler -u tools/sparkline_diag.py
-
-
 
       - name: Disconnect OpenVPN
         if: always()
