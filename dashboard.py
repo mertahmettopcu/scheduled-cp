@@ -111,6 +111,117 @@ def upsert_friend_decisions(rows: list[dict]) -> None:
             _clean(r), on_conflict="coin,date", returning="minimal"
         ).execute()
 
+@st.cache_data(ttl=300)
+def load_price_history(days: int = 60):
+    # close history: (coin, date, close)
+    r = (supabase.table("coin_price_daily")
+         .select("coin,date,close")
+         .order("coin", desc=False)
+         .order("date", desc=False)
+         .execute())
+    df = pd.DataFrame(r.data or [])
+    if df.empty:
+        return df
+    df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
+    df["close"] = pd.to_numeric(df["close"], errors="coerce")
+    # keep last `days` per coin
+    df = (df.sort_values(["coin","date"])
+            .groupby("coin", as_index=False, group_keys=False)
+            .tail(days))
+    return df
+
+@st.cache_data(ttl=300)
+def load_wma_history(days: int = 60):
+    # positions by day: (coin, date, position)
+    r = (supabase.table("coin_wma")
+         .select("coin,date,position")
+         .order("coin", desc=False)
+         .order("date", desc=False)
+         .execute())
+    df = pd.DataFrame(r.data or [])
+    if df.empty:
+        return df
+    df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
+    # keep last `days` per coin
+    df = (df.sort_values(["coin","date"])
+            .groupby("coin", as_index=False, group_keys=False)
+            .tail(days))
+    return df
+
+def _ratio(decision: str) -> float:
+    d = (decision or "").strip().lower()
+    return 1.0 if d == "above both" else 0.5 if d == "between" else 0.0
+
+def build_portfolio_curves(df_alloc, days: int = 60, leverage: float = 10.0):
+    """
+    Returns two dataframes with columns [date, value] normalized to 100 at start:
+      - model_curve
+      - friend_curve
+    """
+    df_close = load_price_history(days)
+    df_pos   = load_wma_history(days)
+    df_friend = load_friend_decisions()
+
+    if df_close.empty or df_pos.empty:
+        return pd.DataFrame(columns=["date","value"]), pd.DataFrame(columns=["date","value"])
+
+    # allocations: coin -> amount (units)
+    alloc_map = {str(r["coin"]).upper(): float(r["allocation_amount"] or 0.0)
+                 for _, r in (df_alloc.fillna(0)).iterrows()}
+
+    # friend decisions by (coin,date)
+    friend_map = {}
+    if not df_friend.empty:
+        for _, r in df_friend.iterrows():
+            friend_map[(str(r["coin"]).upper(), r["date"])] = str(r["decision"])
+
+    # join close + model position per coin/date
+    df = (df_close.merge(df_pos, on=["coin","date"], how="inner")
+                 .sort_values(["date","coin"]))
+    if df.empty:
+        return pd.DataFrame(columns=["date","value"]), pd.DataFrame(columns=["date","value"])
+
+    # compute daily notional per coin for model + friend
+    rows = []
+    for _, r in df.iterrows():
+        coin = str(r["coin"]).upper()
+        amt  = float(alloc_map.get(coin, 0.0))
+        if amt <= 0:
+            continue
+        close = float(r["close"]) if pd.notnull(r["close"]) else np.nan
+        if not np.isfinite(close):
+            continue
+
+        model_dec = str(r["position"])
+        model_ratio = _ratio(model_dec)
+
+        friend_dec = friend_map.get((coin, r["date"]), model_dec)
+        friend_ratio = _ratio(friend_dec)
+
+        model_val  = close * amt * model_ratio  * leverage
+        friend_val = close * amt * friend_ratio * leverage
+
+        rows.append({"date": r["date"], "model": model_val, "friend": friend_val})
+
+    if not rows:
+        return pd.DataFrame(columns=["date","value"]), pd.DataFrame(columns=["date","value"])
+
+    daily = (pd.DataFrame(rows)
+                .groupby("date", as_index=False)[["model","friend"]].sum()
+                .sort_values("date"))
+
+    # normalize to 100 at first non-zero
+    def _normalize(col):
+        s = daily[col].astype(float)
+        base = float(s.iloc[0]) if len(s) else 0.0
+        if base == 0:
+            base = 1.0
+        return (s / base) * 100.0
+
+    model_curve  = pd.DataFrame({"date": daily["date"], "value": _normalize("model")})
+    friend_curve = pd.DataFrame({"date": daily["date"], "value": _normalize("friend")})
+    return model_curve, friend_curve
+
 # -------------------- Sparkline renderer (hourly cache JSON) --------------------
 def render_spark_24h(series, noon_index, w50, w200) -> str | None:
     """
@@ -295,16 +406,15 @@ edited = st.data_editor(
 
 if st.button("💾 Save friend decisions (today)"):
     before = df.set_index("coin")["friend_decision"]
-    after = pd.DataFrame(edited).set_index("coin")["friend_decision"]
-    
-    # align indexes so compare works
+    after  = pd.DataFrame(edited).set_index("coin")["friend_decision"]
     before, after = before.align(after, join="outer")
-    
     changed = after[after != before].dropna()
-
     payload = [{"coin": c, "date": today_trt, "decision": v} for c, v in changed.items()]
     upsert_friend_decisions(payload)
-    st.success(f"Saved {len(payload)} change(s). Please rerun to refresh values.")
+    load_friend_decisions.clear()
+    st.success(f"Saved {len(payload)} change(s). Reloading data…")
+    st.rerun()
+
 
 # -------------------- Portfolio snapshot metrics (today) --------------------
 st.subheader("Portfolio snapshot — current notional (USD, 10×)")
@@ -314,3 +424,22 @@ cA, cB, cC = st.columns(3)
 cA.metric("Model total (USD)", f"{model_total:,.2f}")
 cB.metric("Friend total (USD)", f"{friend_total:,.2f}")
 cC.metric("Difference (USD)", f"{(model_total - friend_total):,.2f}")
+
+# -------------------- Comparison chart (index = 100 at start) --------------------
+st.subheader("Model vs Friend — indexed portfolio value (last 60 days)")
+model_curve, friend_curve = build_portfolio_curves(df_alloc, days=60, leverage=LEVERAGE)
+
+if model_curve.empty or friend_curve.empty:
+    st.info("Not enough history yet to draw the comparison curve.")
+else:
+    fig, ax = plt.subplots(figsize=(6.5, 2.8), dpi=150)
+    x = pd.to_datetime(model_curve["date"])
+    ax.plot(x, model_curve["value"], label="Model", linewidth=1.5)
+    ax.plot(x, friend_curve["value"], label="Friend", linewidth=1.5)
+    ax.set_ylabel("Index (start = 100)")
+    ax.grid(True, linewidth=0.4, alpha=0.4)
+    ax.legend(loc="best", fontsize=8)
+    for spine in ("top","right"):
+        ax.spines[spine].set_visible(False)
+    st.pyplot(fig, clear_figure=True)
+
