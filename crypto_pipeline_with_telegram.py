@@ -20,6 +20,7 @@ import numpy as np
 import pandas as pd
 import requests
 from supabase import create_client, Client
+import json
 
 # -------------------- Config --------------------
 DAYS_BACK = 260                 # how many days of OHLC hours to pull
@@ -225,6 +226,80 @@ def to_json_safe_records(df: pd.DataFrame) -> List[Dict]:
                 r[k] = int(v)
         out.append(r)
     return out
+# -------------------- Allocations (Google Sheet CSV) --------------------
+def sync_allocations_from_sheet(url: Optional[str]) -> None:
+    """
+    Read a public CSV (coin, allocation_amount) and upsert into coin_allocations.
+    Safe no-op if url is None/empty or fetch fails.
+    """
+    if not url:
+        log("ℹ️ GSHEET_ALLOCATIONS_CSV not set; skipping allocations sync.")
+        return
+    try:
+        df = pd.read_csv(url)
+        if df.empty or "coin" not in df.columns or "allocation_amount" not in df.columns:
+            log("ℹ️ Allocation CSV missing required columns [coin, allocation_amount]; skipping.")
+            return
+        df["coin"] = df["coin"].astype(str).str.upper().str.strip()
+        df["allocation_amount"] = pd.to_numeric(df["allocation_amount"], errors="coerce").fillna(0.0)
+        rows = []
+        for r in df.to_dict(orient="records"):
+            rows.append({
+                "coin": r["coin"],
+                "allocation_amount": float(r["allocation_amount"]),
+            })
+        if rows:
+            supabase.table("coin_allocations").upsert(
+                rows, on_conflict="coin", returning="minimal"
+            ).execute()
+            log(f"✅ Synced {len(rows)} allocation rows from sheet")
+    except Exception as e:
+        log(f"ℹ️ Failed to sync allocations from sheet: {e}")
+
+# -------------------- Intraday 24h cache for per-row sparkline --------------------
+def build_and_upsert_24h_cache(base: str) -> None:
+    """
+    Fetch ~48h of hourly klines for baseUSDT, keep last 24 closes.
+    Compute noon_index (closest to 12:00 Europe/Istanbul) inside those 24.
+    Upsert a single row into coin_hourly_24h_cache.
+    """
+    try:
+        end_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        start_ms = end_ms - 48 * 3600 * 1000
+        pair = f"{base}USDT"
+        raw = fetch_hourly(pair, start_ms, end_ms)
+        if not raw:
+            log(f"  └─ ℹ️ No hourly data for {base} (cache skip)")
+            return
+
+        cols = ["open_time","open","high","low","close","volume","close_time","qav","num_trades","taker_base","taker_quote","ignore"]
+        df = pd.DataFrame(raw, columns=cols)
+        df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
+        df["close"] = pd.to_numeric(df["close"], errors="coerce")
+        df = df.dropna(subset=["close"]).sort_values("open_time").reset_index(drop=True)
+
+        # last 24 candles
+        tail = df.tail(24).copy()
+        if tail.empty:
+            log(f"  └─ ℹ️ <24 hourly points for {base} (cache skip)")
+            return
+
+        # series JSON: [{"t": iso_utc, "c": close}, ...]
+        series = [{"t": t.isoformat().replace("+00:00","Z"), "c": float(c)}
+                  for t, c in zip(tail["open_time"], tail["close"])]
+
+        # noon index (closest to 12:00 in Europe/Istanbul across the 24)
+        local = tail["open_time"].dt.tz_convert(NOON_TZ)
+        diffs = (local.dt.hour - 12).abs() + (local.dt.minute / 60.0)
+        noon_index = int(diffs.to_numpy().argmin()) if len(diffs) else None
+
+        supabase.table("coin_hourly_24h_cache").upsert(
+            {"coin": base, "series": series, "noon_index": noon_index},
+            on_conflict="coin", returning="minimal"
+        ).execute()
+        log(f"  └─ 🧩 24h cache upserted for {base} (noon_idx={noon_index})")
+    except Exception as e:
+        log(f"  └─ ℹ️ Failed 24h cache for {base}: {e}")
 
 # -------------------- Per-coin build --------------------
 def build_daily_for_symbol(base: str, days_back: int) -> Optional[pd.DataFrame]:
@@ -292,6 +367,9 @@ def build_daily_for_symbol(base: str, days_back: int) -> Optional[pd.DataFrame]:
 # -------------------- Run --------------------
 def run():
     pairs = select_pairs(MUST_HAVE_BASES, take_total=30)
+    # Sync allocations from Google Sheet CSV (once per run)
+    sync_allocations_from_sheet(os.getenv("GSHEET_ALLOCATIONS_CSV"))
+
     bases = [p.replace("USDT","") for p in pairs]
 
     all_rows: List[Dict] = []
@@ -317,6 +395,10 @@ def run():
 
             latest_dates[base] = daily.iloc[-1]["date"]
             all_rows.extend(to_json_safe_records(daily))
+            
+            # Build 24h hourly cache for per-row sparkline (fast dashboard)
+            build_and_upsert_24h_cache(base)
+
 
         except Exception as e:
             log(f"  └─ ❌ {base}: {e}")
