@@ -230,31 +230,56 @@ def to_json_safe_records(df: pd.DataFrame) -> List[Dict]:
 def sync_allocations_from_sheet(url: Optional[str]) -> None:
     """
     Read a public CSV (coin, allocation_amount) and upsert into coin_allocations.
-    Safe no-op if url is None/empty or fetch fails.
+    Logs a per-coin summary so you can verify everything (e.g., TRX).
     """
     if not url:
         log("ℹ️ GSHEET_ALLOCATIONS_CSV not set; skipping allocations sync.")
         return
     try:
-        df = pd.read_csv(url)
+        df = pd.read_csv(url, dtype=str).fillna("")
         if df.empty or "coin" not in df.columns or "allocation_amount" not in df.columns:
             log("ℹ️ Allocation CSV missing required columns [coin, allocation_amount]; skipping.")
             return
-        df["coin"] = df["coin"].astype(str).str.upper().str.strip()
-        df["allocation_amount"] = pd.to_numeric(df["allocation_amount"], errors="coerce").fillna(0.0)
-        rows = []
-        for r in df.to_dict(orient="records"):
-            rows.append({
-                "coin": r["coin"],
-                "allocation_amount": float(r["allocation_amount"]),
-            })
+
+        # normalize
+        df["coin"] = df["coin"].astype(str).str.upper().str.replace(r"\s+", "", regex=True)
+        # robust numeric parse
+        def _to_float(x):
+            try:
+                # allow commas, stray spaces
+                x = str(x).replace(",", "").strip()
+                return float(x)
+            except Exception:
+                return 0.0
+        df["allocation_amount"] = df["allocation_amount"].apply(_to_float)
+
+        # collapse duplicates by last occurrence
+        df = df.groupby("coin", as_index=False).agg({"allocation_amount": "last"})
+
+        total_rows = len(df)
+        positive = df[df["allocation_amount"] > 0]
+        zeros = df[df["allocation_amount"] <= 0]
+
+        # upsert
+        rows = [{"coin": r["coin"], "allocation_amount": float(r["allocation_amount"])}
+                for r in df.to_dict(orient="records")]
         if rows:
             supabase.table("coin_allocations").upsert(
                 rows, on_conflict="coin", returning="minimal"
             ).execute()
-            log(f"✅ Synced {len(rows)} allocation rows from sheet")
+
+        # detailed logging
+        log(f"✅ Synced allocations: {total_rows} row(s) | >0 amounts: {len(positive)} | zero/invalid: {len(zeros)}")
+        if not positive.empty:
+            sample = ", ".join(f"{r['coin']}={r['allocation_amount']}" for _, r in positive.head(10).iterrows())
+            log(f"  └─ sample >0: {sample}{' …' if len(positive) > 10 else ''}")
+        if not zeros.empty:
+            sample0 = ", ".join(f"{r['coin']}={r['allocation_amount']}" for _, r in zeros.head(10).iterrows())
+            log(f"  └─ zeros/invalid: {sample0}{' …' if len(zeros) > 10 else ''}")
+
     except Exception as e:
         log(f"ℹ️ Failed to sync allocations from sheet: {e}")
+
 
 # -------------------- Intraday 24h cache for per-row sparkline --------------------
 def build_and_upsert_24h_cache(base: str) -> None:
