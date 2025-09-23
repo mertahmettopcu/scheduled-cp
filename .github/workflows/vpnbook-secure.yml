@@ -96,6 +96,7 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GSHEET_ALLOCATIONS_CSV: ${{ secrets.GSHEET_ALLOCATIONS_CSV }}   # <— NEW  
           PYTHONUNBUFFERED: "1"
         run: python -u crypto_pipeline_with_telegram.py
 
