@@ -86,6 +86,36 @@ def load_friend_decisions():
     if "date" in df.columns:
         df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
     return df
+def compute_decision_match_rate_alltime(df_alloc):
+    """
+    Cumulative match rate across ALL saved friend decisions (no time limit).
+    Counts only coins that have allocation_amount > 0.
+    Returns (rate_pct, agree_count, total_compared).
+    """
+    # pull full history (big number = effectively all)
+    df_pos = load_wma_history(days=9999)        # coin, date, position
+    df_friend_all = load_friend_decisions()     # coin, date, decision
+
+    # only compare coins you actually allocate to
+    alloc_pos = df_alloc.copy()
+    alloc_pos["coin"] = alloc_pos["coin"].astype(str).str.upper()
+    alloc_set = set(alloc_pos.loc[alloc_pos["allocation_amount"] > 0, "coin"])
+
+    if df_pos.empty or df_friend_all.empty or not alloc_set:
+        return np.nan, 0, 0
+
+    df_pos = df_pos.copy()
+    df_pos["coin"] = df_pos["coin"].astype(str).str.upper()
+    df_pos = df_pos[df_pos["coin"].isin(alloc_set)]
+    df_pos = df_pos.rename(columns={"position": "model_position"})
+
+    df_friend = df_friend_all.copy()
+    df_friend["coin"] = df_friend["coin"].astype(str).str.upper()
+
+    comp = df_friend.merge(
+        df_pos[["coin", "date", "model_position"]],
+        on=["coin", "date"],
+
 
 # -------------------- Friend decisions upsert (JSON-safe) --------------------
 def upsert_friend_decisions(rows: list[dict]) -> None:
@@ -420,10 +450,20 @@ if st.button("💾 Save friend decisions (today)"):
 st.subheader("Portfolio snapshot — current notional (USD, 10×)")
 model_total = float(df["model_value_usd"].sum())
 friend_total = float(df["friend_value_usd"].sum())
-cA, cB, cC = st.columns(3)
+cA, cB, cC, cD = st.columns(4)
 cA.metric("Model total (USD)", f"{model_total:,.2f}")
 cB.metric("Friend total (USD)", f"{friend_total:,.2f}")
 cC.metric("Difference (USD)", f"{(model_total - friend_total):,.2f}")
+
+# All-time decision match
+rate_all, agree_n, total_n = compute_decision_match_rate_alltime(df_alloc)
+if np.isnan(rate_all):
+    cD.metric("Decision match (all-time)", "—", help="No saved friend decisions yet.")
+else:
+    cD.metric("Decision match (all-time)", f"{rate_all:.1f}%", f"{agree_n}/{total_n}")
+
+
+
 
 # -------------------- Comparison chart (index = 100 at start) --------------------
 st.subheader("Model vs Friend — indexed portfolio value (last 60 days)")
@@ -432,14 +472,25 @@ model_curve, friend_curve = build_portfolio_curves(df_alloc, days=60, leverage=L
 if model_curve.empty or friend_curve.empty:
     st.info("Not enough history yet to draw the comparison curve.")
 else:
+    import matplotlib.dates as mdates
+
     fig, ax = plt.subplots(figsize=(6.5, 2.8), dpi=150)
     x = pd.to_datetime(model_curve["date"])
-    ax.plot(x, model_curve["value"], label="Model", linewidth=1.5)
-    ax.plot(x, friend_curve["value"], label="Friend", linewidth=1.5)
+
+    # Draw Model first (dashed, slightly transparent), Friend on top (solid)
+    ax.plot(x, model_curve["value"], label="Model", linewidth=1.6,
+            linestyle="--", alpha=0.8, zorder=1)
+    ax.plot(x, friend_curve["value"], label="Friend", linewidth=1.8,
+            linestyle="-", alpha=1.0, zorder=2)
+
+    # Smarter date ticks
+    locator = mdates.AutoDateLocator(minticks=4, maxticks=8)
+    ax.xaxis.set_major_locator(locator)
+    ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
+
     ax.set_ylabel("Index (start = 100)")
     ax.grid(True, linewidth=0.4, alpha=0.4)
-    ax.legend(loc="best", fontsize=8)
+    ax.legend(loc="best", fontsize=9)
     for spine in ("top","right"):
         ax.spines[spine].set_visible(False)
     st.pyplot(fig, clear_figure=True)
-
