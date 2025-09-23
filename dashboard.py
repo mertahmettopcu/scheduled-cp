@@ -94,10 +94,16 @@ def load_intraday_cache():
 @st.cache_data(ttl=300)
 def load_friend_decisions():
     r = supabase.table("friend_decisions").select("*").execute()
-    df = pd.DataFrame(r.data or [])
-    if not df.empty:
+    data = r.data or []
+    if not data:
+        # Ensure required columns exist even when empty
+        return pd.DataFrame(columns=["coin", "date", "decision"])
+    df = pd.DataFrame(data)
+    # normalize types
+    if "date" in df.columns:
         df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
     return df
+
 
 # -------------------- Sparkline renderer (hourly cache) --------------------
 def render_spark_24h(series, noon_index, w50, w200) -> str | None:
@@ -320,8 +326,11 @@ for _, row in df_latest.sort_values("coin").iterrows():
     model_pos = row.get("position","Between") or "Between"
     alloc_amt = float(df_alloc.loc[df_alloc["coin"]==coin, "allocation_amount"].max()) if coin in set(df_alloc["coin"]) else 0.0
     # prefill friend value if already saved today
-    prev = df_friend.loc[(df_friend["coin"]==coin) & (df_friend["date"]==today_trt), "decision"]
+    prev = pd.Series(dtype=object)
+    if not df_friend.empty and {"coin","date","decision"}.issubset(df_friend.columns):
+        prev = df_friend.loc[(df_friend["coin"]==coin) & (df_friend["date"]==today_trt), "decision"]
     pre = prev.iloc[0] if not prev.empty else model_pos
+
     c = st.columns(4)
     with c[0]: st.write(coin)
     with c[1]: st.write(model_pos)
