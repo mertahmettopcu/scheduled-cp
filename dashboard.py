@@ -141,9 +141,10 @@ def render_spark_24h(series, noon_index, w50, w200) -> str | None:
         ax.scatter([int(noon_index)], [closes[int(noon_index)]], s=14, zorder=5)
     # horizontal WMA refs (daily)
     if isinstance(w50, (int, float)) and np.isfinite(w50):
-        ax.axhline(w50, linestyle=":", linewidth=1.0)
+        ax.axhline(w50, color="green", linestyle=":", linewidth=1.0, label="WMA50")
     if isinstance(w200, (int, float)) and np.isfinite(w200):
-        ax.axhline(w200, linestyle=":", linewidth=1.0)
+        ax.axhline(w200, color="orange", linestyle="--", linewidth=1.0, label="WMA200")
+
 
     ax.set_xticks([]); ax.set_yticks([]); ax.axis("off")
     ymin, ymax = np.nanmin(closes[mask]), np.nanmax(closes[mask])
@@ -295,7 +296,12 @@ edited = st.data_editor(
 if st.button("💾 Save friend decisions (today)"):
     before = df.set_index("coin")["friend_decision"]
     after = pd.DataFrame(edited).set_index("coin")["friend_decision"]
+    
+    # align indexes so compare works
+    before, after = before.align(after, join="outer")
+    
     changed = after[after != before].dropna()
+
     payload = [{"coin": c, "date": today_trt, "decision": v} for c, v in changed.items()]
     upsert_friend_decisions(payload)
     st.success(f"Saved {len(payload)} change(s). Please rerun to refresh values.")
