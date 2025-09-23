@@ -115,6 +115,16 @@ def compute_decision_match_rate_alltime(df_alloc):
     comp = df_friend.merge(
         df_pos[["coin", "date", "model_position"]],
         on=["coin", "date"],
+        how="inner",
+    )
+
+    total = len(comp)
+    if total == 0:
+        return np.nan, 0, 0
+
+    agree = int((comp["decision"].astype(str) == comp["model_position"].astype(str)).sum())
+    rate = 100.0 * agree / total
+    return rate, agree, total
 
 
 # -------------------- Friend decisions upsert (JSON-safe) --------------------
