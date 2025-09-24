@@ -15,11 +15,15 @@ from supabase import create_client
 
 st.set_page_config(page_title="Crypto WMA Dashboard", layout="wide")
 
+# =========================================================
 # Constants
+# =========================================================
 LEVERAGE = 10.0            # 10x cross
 NOON_TZ = "Europe/Istanbul"
 
-# -------------------- Supabase creds --------------------
+# =========================================================
+# Supabase creds
+# =========================================================
 def _read_supabase_creds():
     url = None
     key = None
@@ -45,7 +49,9 @@ def supabase_client():
 
 supabase = supabase_client()
 
-# -------------------- Data loaders --------------------
+# =========================================================
+# Data loaders
+# =========================================================
 @st.cache_data(ttl=300)
 def load_snapshot():
     r = supabase.table("coin_wma_latest").select("*").execute()
@@ -86,70 +92,6 @@ def load_friend_decisions():
     if "date" in df.columns:
         df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
     return df
-def compute_decision_match_rate_alltime(df_alloc):
-    """
-    Cumulative match rate across ALL saved friend decisions (no time limit).
-    Counts only coins that have allocation_amount > 0.
-    Returns (rate_pct, agree_count, total_compared).
-    """
-    # pull full history (big number = effectively all)
-    df_pos = load_wma_history(days=9999)        # coin, date, position
-    df_friend_all = load_friend_decisions()     # coin, date, decision
-
-    # only compare coins you actually allocate to
-    alloc_pos = df_alloc.copy()
-    alloc_pos["coin"] = alloc_pos["coin"].astype(str).str.upper()
-    alloc_set = set(alloc_pos.loc[alloc_pos["allocation_amount"] > 0, "coin"])
-
-    if df_pos.empty or df_friend_all.empty or not alloc_set:
-        return np.nan, 0, 0
-
-    df_pos = df_pos.copy()
-    df_pos["coin"] = df_pos["coin"].astype(str).str.upper()
-    df_pos = df_pos[df_pos["coin"].isin(alloc_set)]
-    df_pos = df_pos.rename(columns={"position": "model_position"})
-
-    df_friend = df_friend_all.copy()
-    df_friend["coin"] = df_friend["coin"].astype(str).str.upper()
-
-    comp = df_friend.merge(
-        df_pos[["coin", "date", "model_position"]],
-        on=["coin", "date"],
-        how="inner",
-    )
-
-    total = len(comp)
-    if total == 0:
-        return np.nan, 0, 0
-
-    agree = int((comp["decision"].astype(str) == comp["model_position"].astype(str)).sum())
-    rate = 100.0 * agree / total
-    return rate, agree, total
-
-
-# -------------------- Friend decisions upsert (JSON-safe) --------------------
-def upsert_friend_decisions(rows: list[dict]) -> None:
-    if not rows:
-        return
-
-    def _clean(r: dict) -> dict:
-        out = {}
-        out["coin"] = str(r.get("coin","")).upper().strip()
-        d = r.get("date")
-        # normalize date -> YYYY-MM-DD
-        if isinstance(d, pd.Timestamp):
-            d = d.date()
-        if hasattr(d, "isoformat"):
-            out["date"] = d.isoformat()
-        else:
-            out["date"] = str(d)
-        out["decision"] = str(r.get("decision","")).strip()
-        return out
-
-    for r in rows:
-        supabase.table("friend_decisions").upsert(
-            _clean(r), on_conflict="coin,date", returning="minimal"
-        ).execute()
 
 @st.cache_data(ttl=300)
 def load_price_history(days: int = 60):
@@ -188,81 +130,53 @@ def load_wma_history(days: int = 60):
             .tail(days))
     return df
 
+# =========================================================
+# Helpers
+# =========================================================
 def _ratio(decision: str) -> float:
     d = (decision or "").strip().lower()
     return 1.0 if d == "above both" else 0.5 if d == "between" else 0.0
 
-def build_portfolio_curves(df_alloc, days: int = 60, leverage: float = 10.0):
-    """
-    Returns two dataframes with columns [date, value] normalized to 100 at start:
-      - model_curve
-      - friend_curve
-    """
-    df_close = load_price_history(days)
-    df_pos   = load_wma_history(days)
-    df_friend = load_friend_decisions()
+def ratio_from_decision(d: str) -> float:
+    d = (d or "").strip().lower()
+    return 1.0 if d == "above both" else 0.5 if d == "between" else 0.0
 
-    if df_close.empty or df_pos.empty:
-        return pd.DataFrame(columns=["date","value"]), pd.DataFrame(columns=["date","value"])
+def op_from_prev_to_now(prev: str, now: str, amt: float) -> str:
+    rp, rn = ratio_from_decision(prev), ratio_from_decision(now)
+    delta = rn - rp
+    if abs(delta) < 1e-12:
+        return "No action"
+    action = "Buy" if delta > 0 else "Sell"
+    qty = abs(delta) * max(amt, 0.0)
+    return f"{action} {qty:.6f}"
 
-    # allocations: coin -> amount (units)
-    alloc_map = {str(r["coin"]).upper(): float(r["allocation_amount"] or 0.0)
-                 for _, r in (df_alloc.fillna(0)).iterrows()}
-
-    # friend decisions by (coin,date)
-    friend_map = {}
-    if not df_friend.empty:
-        for _, r in df_friend.iterrows():
-            friend_map[(str(r["coin"]).upper(), r["date"])] = str(r["decision"])
-
-    # join close + model position per coin/date
-    df = (df_close.merge(df_pos, on=["coin","date"], how="inner")
-                 .sort_values(["date","coin"]))
-    if df.empty:
-        return pd.DataFrame(columns=["date","value"]), pd.DataFrame(columns=["date","value"])
-
-    # compute daily notional per coin for model + friend
-    rows = []
-    for _, r in df.iterrows():
-        coin = str(r["coin"]).upper()
-        amt  = float(alloc_map.get(coin, 0.0))
-        if amt <= 0:
-            continue
-        close = float(r["close"]) if pd.notnull(r["close"]) else np.nan
-        if not np.isfinite(close):
-            continue
-
-        model_dec = str(r["position"])
-        model_ratio = _ratio(model_dec)
-
-        friend_dec = friend_map.get((coin, r["date"]), model_dec)
-        friend_ratio = _ratio(friend_dec)
-
-        model_val  = close * amt * model_ratio  * leverage
-        friend_val = close * amt * friend_ratio * leverage
-
-        rows.append({"date": r["date"], "model": model_val, "friend": friend_val})
-
+# -------------------- Friend decisions upsert (JSON-safe) --------------------
+def upsert_friend_decisions(rows: list[dict]) -> None:
     if not rows:
-        return pd.DataFrame(columns=["date","value"]), pd.DataFrame(columns=["date","value"])
+        return
 
-    daily = (pd.DataFrame(rows)
-                .groupby("date", as_index=False)[["model","friend"]].sum()
-                .sort_values("date"))
+    def _clean(r: dict) -> dict:
+        out = {}
+        out["coin"] = str(r.get("coin","")).upper().strip()
+        d = r.get("date")
+        # normalize date -> YYYY-MM-DD
+        if isinstance(d, pd.Timestamp):
+            d = d.date()
+        if hasattr(d, "isoformat"):
+            out["date"] = d.isoformat()
+        else:
+            out["date"] = str(d)
+        out["decision"] = str(r.get("decision","")).strip()
+        return out
 
-    # normalize to 100 at first non-zero
-    def _normalize(col):
-        s = daily[col].astype(float)
-        base = float(s.iloc[0]) if len(s) else 0.0
-        if base == 0:
-            base = 1.0
-        return (s / base) * 100.0
+    for r in rows:
+        supabase.table("friend_decisions").upsert(
+            _clean(r), on_conflict="coin,date", returning="minimal"
+        ).execute()
 
-    model_curve  = pd.DataFrame({"date": daily["date"], "value": _normalize("model")})
-    friend_curve = pd.DataFrame({"date": daily["date"], "value": _normalize("friend")})
-    return model_curve, friend_curve
-
-# -------------------- Sparkline renderer (hourly cache JSON) --------------------
+# =========================================================
+# Sparkline renderer (hourly cache JSON)
+# =========================================================
 def render_spark_24h(series, noon_index, w50, w200) -> str | None:
     """
     series: list of {"t": iso8601 UTC string, "c": float}
@@ -271,7 +185,6 @@ def render_spark_24h(series, noon_index, w50, w200) -> str | None:
     """
     if not series or len(series) < 2:
         return None
-    # parse closes
     closes = np.array([float(p.get("c", np.nan)) for p in series], dtype=float)
     x = np.arange(len(closes))
     mask = ~np.isnan(closes)
@@ -295,7 +208,6 @@ def render_spark_24h(series, noon_index, w50, w200) -> str | None:
         ax.axhline(w50, color="green", linestyle=":", linewidth=1.0, label="WMA50")
     if isinstance(w200, (int, float)) and np.isfinite(w200):
         ax.axhline(w200, color="orange", linestyle="--", linewidth=1.0, label="WMA200")
-
 
     ax.set_xticks([]); ax.set_yticks([]); ax.axis("off")
     ymin, ymax = np.nanmin(closes[mask]), np.nanmax(closes[mask])
@@ -333,21 +245,146 @@ def build_spark_df(df_latest: pd.DataFrame, df_cache: pd.DataFrame) -> pd.DataFr
         imgs.append({"coin": coin, "spark_24h": img})
     return pd.DataFrame(imgs)
 
-# -------------------- Logic helpers --------------------
-def ratio_from_decision(d: str) -> float:
-    d = (d or "").strip().lower()
-    return 1.0 if d == "above both" else 0.5 if d == "between" else 0.0
+# =========================================================
+# Carry-forward aware analytics
+# =========================================================
+def build_portfolio_curves(df_alloc, days: int = 60, leverage: float = 10.0):
+    """
+    Returns two dataframes with columns [date, value] normalized to 100 at start:
+      - model_curve
+      - friend_curve
 
-def op_from_prev_to_now(prev: str, now: str, amt: float) -> str:
-    rp, rn = ratio_from_decision(prev), ratio_from_decision(now)
-    delta = rn - rp
-    if abs(delta) < 1e-12:
-        return "No action"
-    action = "Buy" if delta > 0 else "Sell"
-    qty = abs(delta) * max(amt, 0.0)
-    return f"{action} {qty:.6f}"
+    Friend stance is the latest saved decision as-of each date (carry-forward).
+    """
+    df_close = load_price_history(days)
+    df_pos   = load_wma_history(days)
+    df_friend = load_friend_decisions()
 
-# -------------------- Page --------------------
+    if df_close.empty or df_pos.empty:
+        return pd.DataFrame(columns=["date","value"]), pd.DataFrame(columns=["date","value"])
+
+    # allocations: coin -> amount (units)
+    alloc_map = {str(r["coin"]).upper(): float(r["allocation_amount"] or 0.0)
+                 for _, r in (df_alloc.fillna(0)).iterrows()}
+
+    # join close + model position per coin/date
+    df = (df_close.merge(df_pos, on=["coin","date"], how="inner")
+                 .sort_values(["coin","date"]))
+    if df.empty:
+        return pd.DataFrame(columns=["date","value"]), pd.DataFrame(columns=["date","value"])
+
+    # --- carried-forward friend decision per coin/date
+    df["coin"] = df["coin"].astype(str).str.upper()
+    df_dates = df[["coin", "date"]].drop_duplicates().sort_values(["coin","date"])
+
+    ff = pd.DataFrame(columns=["coin","date","friend_decision_cf"])
+    if not df_friend.empty:
+        df_friend_cf = df_friend.copy()
+        df_friend_cf["coin"] = df_friend_cf["coin"].astype(str).str.upper()
+        df_friend_cf = df_friend_cf.sort_values(["coin","date"])
+        ff = pd.merge_asof(
+            df_dates,
+            df_friend_cf.rename(columns={"decision": "friend_decision_cf"}).sort_values(["coin","date"]),
+            on="date", by="coin",
+            direction="backward", allow_exact_matches=True
+        )[["coin","date","friend_decision_cf"]]
+
+    # attach CF friend decision; if none exists as-of date, fall back to model
+    df = df.merge(ff, on=["coin","date"], how="left")
+    df["friend_decision_eff"] = df["friend_decision_cf"].fillna(df["position"])
+
+    # compute daily notional per coin for model + friend
+    rows = []
+    for _, r in df.iterrows():
+        coin = str(r["coin"]).upper()
+        amt  = float(alloc_map.get(coin, 0.0))
+        if amt <= 0:
+            continue
+        close = float(r["close"]) if pd.notnull(r["close"]) else np.nan
+        if not np.isfinite(close):
+            continue
+
+        model_dec = str(r["position"])
+        friend_dec = str(r["friend_decision_eff"])
+
+        model_val  = close * amt * _ratio(model_dec)  * leverage
+        friend_val = close * amt * _ratio(friend_dec) * leverage
+
+        rows.append({"date": r["date"], "model": model_val, "friend": friend_val})
+
+    if not rows:
+        return pd.DataFrame(columns=["date","value"]), pd.DataFrame(columns=["date","value"])
+
+    daily = (pd.DataFrame(rows)
+                .groupby("date", as_index=False)[["model","friend"]].sum()
+                .sort_values("date"))
+
+    # normalize to 100 at first non-zero
+    def _normalize(col):
+        s = daily[col].astype(float)
+        base = float(s.iloc[0]) if len(s) else 0.0
+        if base == 0:
+            base = 1.0
+        return (s / base) * 100.0
+
+    model_curve  = pd.DataFrame({"date": daily["date"], "value": _normalize("model")})
+    friend_curve = pd.DataFrame({"date": daily["date"], "value": _normalize("friend")})
+    return model_curve, friend_curve
+
+def compute_decision_match_rate_alltime(df_alloc):
+    """
+    Compare friend's carried-forward stance vs model_position across all dates,
+    but only for coins with allocation_amount > 0.
+    Returns (rate_pct, agree_count, total_compared).
+    """
+    df_pos = load_wma_history(days=9999)        # coin, date, position (model)
+    df_friend_all = load_friend_decisions()     # coin, date, decision (friend saves)
+
+    # Only consider coins you actually allocate to (>0)
+    alloc_pos = df_alloc.copy()
+    alloc_pos["coin"] = alloc_pos["coin"].astype(str).str.upper()
+    alloc_set = set(alloc_pos.loc[alloc_pos["allocation_amount"] > 0, "coin"])
+
+    if df_pos.empty or not alloc_set:
+        return np.nan, 0, 0
+
+    df_pos = df_pos.copy()
+    df_pos["coin"] = df_pos["coin"].astype(str).str.upper()
+    df_pos = df_pos[df_pos["coin"].isin(alloc_set)].sort_values(["coin","date"])
+
+    if df_friend_all.empty:
+        # no friend saves at all -> nothing to compare
+        return np.nan, 0, 0
+
+    df_friend_all = df_friend_all.copy()
+    df_friend_all["coin"] = df_friend_all["coin"].astype(str).str.upper()
+    df_friend_all = df_friend_all.sort_values(["coin","date"])
+
+    # Carry-forward friend decision to each model date per coin
+    ff = pd.merge_asof(
+        df_pos[["coin","date"]],
+        df_friend_all.rename(columns={"decision": "friend_cf"}),
+        on="date", by="coin",
+        direction="backward", allow_exact_matches=True
+    )
+
+    comp = df_pos.merge(ff[["coin","date","friend_cf"]], on=["coin","date"], how="left")
+
+    # If there is no prior friend decision for a date, skip it from the metric
+    comp = comp[comp["friend_cf"].notna()].copy()
+
+    total = len(comp)
+    if total == 0:
+        return np.nan, 0, 0
+
+    comp["agree"] = (comp["position"].astype(str) == comp["friend_cf"].astype(str))
+    agree = int(comp["agree"].sum())
+    rate = 100.0 * agree / total
+    return rate, agree, total
+
+# =========================================================
+# Page
+# =========================================================
 st.title("📈 Crypto WMA Dashboard")
 
 df_latest = load_snapshot()
@@ -359,7 +396,7 @@ df_alloc = load_allocations()
 df_cache = load_intraday_cache()
 df_friend = load_friend_decisions()
 
-# Header
+# Header metrics
 last_dt = df_latest["date"].max()
 coins_shown = df_latest["coin"].nunique()
 c1, c2, c3 = st.columns(3)
@@ -367,26 +404,46 @@ c1.metric("Coins shown", f"{coins_shown}")
 c2.metric("Last updated (UTC)", last_dt.strftime("%Y-%m-%d") if pd.notnull(last_dt) else "—")
 c3.metric("Leverage (x)", f"{LEVERAGE:g}")
 
-# Inline table with friend editor
+# Local "today" in Istanbul (date only)
 today_trt = datetime.now(timezone.utc).astimezone(pd.Timestamp.now(tz=NOON_TZ).tz).date()
 
-# Spark images
+# ---------- Carry-forward prefill for today's editor ----------
+# Today's saved decision (if any)
+df_today_friend = (
+    df_friend[df_friend["date"] == today_trt][["coin", "decision"]]
+      .rename(columns={"decision": "friend_today"})
+)
+
+# Yesterday (or latest prior) decision per coin
+df_prev_friend = (
+    df_friend[df_friend["date"] < today_trt]
+      .sort_values(["coin", "date"])
+      .groupby("coin", as_index=False, group_keys=False)
+      .tail(1)[["coin", "decision"]]
+      .rename(columns={"decision": "friend_yesterday"})
+)
+
+# Spark images once
 spark_df = build_spark_df(df_latest, df_cache)
 
-# friend (today) merge
-df_today_friend = df_friend[df_friend["date"] == today_trt][["coin","decision"]].rename(columns={"decision":"friend_today"})
-
-# assemble view df
+# Assemble view df
 df = (df_latest
       .merge(df_alloc, on="coin", how="left")
       .merge(df_today_friend, on="coin", how="left")
+      .merge(df_prev_friend, on="coin", how="left")
       .merge(spark_df, on="coin", how="left"))
 
 df["allocation_amount"] = pd.to_numeric(df["allocation_amount"], errors="coerce").fillna(0.0)
 df["close"] = pd.to_numeric(df["close"], errors="coerce")
-df["friend_decision"] = df["friend_today"].fillna(df["position"])
 
-# sizes & USD values (today)
+# Prefill order: today's save → yesterday carry-forward → model position
+df["friend_decision"] = (
+    df["friend_today"]
+      .fillna(df["friend_yesterday"])
+      .fillna(df["position"])
+)
+
+# Sizes & USD values (today)
 df["model_ratio"]  = df["position"].apply(ratio_from_decision)
 df["friend_ratio"] = df["friend_decision"].apply(ratio_from_decision)
 
@@ -396,7 +453,7 @@ df["friend_size"]  = df["allocation_amount"] * df["friend_ratio"]
 df["model_value_usd"]  = df["model_size"]  * df["close"] * LEVERAGE
 df["friend_value_usd"] = df["friend_size"] * df["close"] * LEVERAGE
 
-# model operation delta from previous_position
+# Model operation delta from previous_position
 df["model_op"] = df.apply(
     lambda r: op_from_prev_to_now(
         r.get("previous_position","Between"),
@@ -406,7 +463,7 @@ df["model_op"] = df.apply(
     axis=1
 )
 
-# Data editor
+# -------------------- Data editor --------------------
 st.subheader("Latest snapshot (inline friend decisions)")
 view_cols = [
     "coin","date","close","wma_50","wma_200","position","previous_position",
@@ -455,7 +512,6 @@ if st.button("💾 Save friend decisions (today)"):
     st.success(f"Saved {len(payload)} change(s). Reloading data…")
     st.rerun()
 
-
 # -------------------- Portfolio snapshot metrics (today) --------------------
 st.subheader("Portfolio snapshot — current notional (USD, 10×)")
 model_total = float(df["model_value_usd"].sum())
@@ -465,15 +521,12 @@ cA.metric("Model total (USD)", f"{model_total:,.2f}")
 cB.metric("Friend total (USD)", f"{friend_total:,.2f}")
 cC.metric("Difference (USD)", f"{(model_total - friend_total):,.2f}")
 
-# All-time decision match
+# All-time decision match (carry-forward aware)
 rate_all, agree_n, total_n = compute_decision_match_rate_alltime(df_alloc)
 if np.isnan(rate_all):
     cD.metric("Decision match (all-time)", "—", help="No saved friend decisions yet.")
 else:
     cD.metric("Decision match (all-time)", f"{rate_all:.1f}%", f"{agree_n}/{total_n}")
-
-
-
 
 # -------------------- Comparison chart (index = 100 at start) --------------------
 st.subheader("Model vs Friend — indexed portfolio value (last 60 days)")
