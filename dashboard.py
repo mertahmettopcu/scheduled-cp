@@ -273,25 +273,34 @@ def build_portfolio_curves(df_alloc, days: int = 60, leverage: float = 10.0):
     if df.empty:
         return pd.DataFrame(columns=["date","value"]), pd.DataFrame(columns=["date","value"])
 
-    # --- carried-forward friend decision per coin/date
+    # --- carried-forward friend decision per coin/date (use datetime64[ns])
     df["coin"] = df["coin"].astype(str).str.upper()
-    df_dates = df[["coin", "date"]].drop_duplicates().sort_values(["coin","date"])
 
-    ff = pd.DataFrame(columns=["coin","date","friend_decision_cf"])
+    def _to_ts(s):
+        return pd.to_datetime(s, errors="coerce").dt.tz_localize(None)
+
+    # Build the date grid from the merged price/position df
+    df["date_ts"] = _to_ts(df["date"])
+    df_dates = df[["coin", "date_ts"]].drop_duplicates().sort_values(["coin","date_ts"])
+
+    ff = pd.DataFrame(columns=["coin","date_ts","friend_decision_cf"])
     if not df_friend.empty:
         df_friend_cf = df_friend.copy()
         df_friend_cf["coin"] = df_friend_cf["coin"].astype(str).str.upper()
-        df_friend_cf = df_friend_cf.sort_values(["coin","date"])
+        df_friend_cf["date_ts"] = _to_ts(df_friend_cf["date"])
+        df_friend_cf = df_friend_cf.sort_values(["coin","date_ts"])
+
         ff = pd.merge_asof(
             df_dates,
-            df_friend_cf.rename(columns={"decision": "friend_decision_cf"}).sort_values(["coin","date"]),
-            on="date", by="coin",
+            df_friend_cf.rename(columns={"decision": "friend_decision_cf"})[["coin","date_ts","friend_decision_cf"]],
+            on="date_ts", by="coin",
             direction="backward", allow_exact_matches=True
-        )[["coin","date","friend_decision_cf"]]
+        )
 
     # attach CF friend decision; if none exists as-of date, fall back to model
-    df = df.merge(ff, on=["coin","date"], how="left")
+    df = df.merge(ff, on=["coin","date_ts"], how="left")
     df["friend_decision_eff"] = df["friend_decision_cf"].fillna(df["position"])
+
 
     # compute daily notional per coin for model + friend
     rows = []
@@ -337,8 +346,8 @@ def compute_decision_match_rate_alltime(df_alloc):
     but only for coins with allocation_amount > 0.
     Returns (rate_pct, agree_count, total_compared).
     """
-    df_pos = load_wma_history(days=9999)        # coin, date, position (model)
-    df_friend_all = load_friend_decisions()     # coin, date, decision (friend saves)
+    df_pos = load_wma_history(days=9999)        # coin, date (object dates), position
+    df_friend_all = load_friend_decisions()     # coin, date (object dates), decision
 
     # Only consider coins you actually allocate to (>0)
     alloc_pos = df_alloc.copy()
@@ -348,29 +357,38 @@ def compute_decision_match_rate_alltime(df_alloc):
     if df_pos.empty or not alloc_set:
         return np.nan, 0, 0
 
+    # Uppercase + filter
     df_pos = df_pos.copy()
     df_pos["coin"] = df_pos["coin"].astype(str).str.upper()
-    df_pos = df_pos[df_pos["coin"].isin(alloc_set)].sort_values(["coin","date"])
+    df_pos = df_pos[df_pos["coin"].isin(alloc_set)].copy()
 
     if df_friend_all.empty:
-        # no friend saves at all -> nothing to compare
         return np.nan, 0, 0
 
+    # --- Convert to datetime64[ns] for merge_asof
+    def _to_ts(s):
+        return pd.to_datetime(s, errors="coerce").dt.tz_localize(None)
+
+    df_pos["date_ts"] = _to_ts(df_pos["date"])
     df_friend_all = df_friend_all.copy()
     df_friend_all["coin"] = df_friend_all["coin"].astype(str).str.upper()
-    df_friend_all = df_friend_all.sort_values(["coin","date"])
+    df_friend_all["date_ts"] = _to_ts(df_friend_all["date"])
+
+    # Sort by by-keys + on-keys (required by merge_asof)
+    df_pos = df_pos.sort_values(["coin", "date_ts"])
+    df_friend_all = df_friend_all.sort_values(["coin", "date_ts"])
 
     # Carry-forward friend decision to each model date per coin
     ff = pd.merge_asof(
-        df_pos[["coin","date"]],
-        df_friend_all.rename(columns={"decision": "friend_cf"}),
-        on="date", by="coin",
+        df_pos[["coin","date_ts"]],
+        df_friend_all.rename(columns={"decision": "friend_cf"})[["coin","date_ts","friend_cf"]],
+        on="date_ts", by="coin",
         direction="backward", allow_exact_matches=True
     )
 
-    comp = df_pos.merge(ff[["coin","date","friend_cf"]], on=["coin","date"], how="left")
+    comp = df_pos.merge(ff, on=["coin","date_ts"], how="left")
 
-    # If there is no prior friend decision for a date, skip it from the metric
+    # If there is no prior friend decision for a date, skip from the metric
     comp = comp[comp["friend_cf"].notna()].copy()
 
     total = len(comp)
@@ -381,6 +399,7 @@ def compute_decision_match_rate_alltime(df_alloc):
     agree = int(comp["agree"].sum())
     rate = 100.0 * agree / total
     return rate, agree, total
+
 
 # =========================================================
 # Page
