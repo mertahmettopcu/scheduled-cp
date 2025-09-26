@@ -338,7 +338,8 @@ def build_portfolio_curves(df_alloc, days: int = 60, leverage: float = 10.0):
 
     model_curve  = pd.DataFrame({"date": daily["date"], "value": _normalize("model")})
     friend_curve = pd.DataFrame({"date": daily["date"], "value": _normalize("friend")})
-    return model_curve, friend_curve
+    return model_curve, friend_curve, daily   # ⬅️ add daily
+
 
 
 def compute_decision_match_rate_alltime(df_alloc):
@@ -560,32 +561,49 @@ if np.isnan(rate_all):
 else:
     cD.metric("Decision match (all-time)", f"{rate_all:.1f}%", f"{agree_n}/{total_n}")
 
-# -------------------- Comparison chart (index = 100 at start) --------------------
-st.subheader("Model vs Friend — indexed portfolio value (last 60 days)")
-model_curve, friend_curve = build_portfolio_curves(df_alloc, days=60, leverage=LEVERAGE)
+# -------------------- Comparison chart (index = 100 at start and USD compariosn) --------------------
+st.subheader("Model vs Friend — performance (last 60 days)")
+
+# If you used my “inline decisions in chart” option, also pass df_friend_extra=friend_extra
+model_curve, friend_curve, daily = build_portfolio_curves(
+    df_alloc, days=60, leverage=LEVERAGE
+)
 
 if model_curve.empty or friend_curve.empty:
-    st.info("Not enough history yet to draw the comparison curve.")
+    st.info("Not enough history yet to draw the comparison chart.")
 else:
     import matplotlib.dates as mdates
 
-    fig, ax = plt.subplots(figsize=(6.5, 2.8), dpi=150)
-    x = pd.to_datetime(model_curve["date"])
+    mode = st.radio(
+        "Chart scale",
+        ["Indexed (start = 100)", "USD notional"],
+        horizontal=True,
+        index=0,
+    )
 
-    # Draw Model first (dashed, slightly transparent), Friend on top (solid)
-    ax.plot(x, model_curve["value"], label="Model", linewidth=1.6,
-            linestyle="--", alpha=0.8, zorder=1)
-    ax.plot(x, friend_curve["value"], label="Friend", linewidth=1.8,
-            linestyle="-", alpha=1.0, zorder=2)
+    if mode == "Indexed (start = 100)":
+        fig, ax = plt.subplots(figsize=(6.5, 2.8), dpi=150)
+        x = pd.to_datetime(model_curve["date"])
+        ax.plot(x, model_curve["value"], label="Model", linewidth=1.6,
+                linestyle="--", alpha=0.8, zorder=1)
+        ax.plot(x, friend_curve["value"], label="Friend", linewidth=1.8,
+                linestyle="-", alpha=1.0, zorder=2)
+        ax.set_ylabel("Index (start = 100)")
+    else:
+        fig, ax = plt.subplots(figsize=(6.5, 2.8), dpi=150)
+        x = pd.to_datetime(daily["date"])
+        ax.plot(x, daily["model"], label="Model", linewidth=1.6,
+                linestyle="--", alpha=0.8, zorder=1)
+        ax.plot(x, daily["friend"], label="Friend", linewidth=1.8,
+                linestyle="-", alpha=1.0, zorder=2)
+        ax.set_ylabel("USD notional (10×)")
 
-    # Smarter date ticks
     locator = mdates.AutoDateLocator(minticks=4, maxticks=8)
     ax.xaxis.set_major_locator(locator)
     ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
-
-    ax.set_ylabel("Index (start = 100)")
     ax.grid(True, linewidth=0.4, alpha=0.4)
     ax.legend(loc="best", fontsize=9)
     for spine in ("top","right"):
         ax.spines[spine].set_visible(False)
+
     st.pyplot(fig, clear_figure=True)
