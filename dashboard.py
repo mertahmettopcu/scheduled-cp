@@ -230,33 +230,33 @@ def build_spark_df(df_latest: pd.DataFrame, df_cache: pd.DataFrame) -> pd.DataFr
 # =========================================================
 # Carry-forward aware analytics  (no merge_asof)
 # =========================================================
-def build_portfolio_curves(df_alloc, days: int = 60, leverage: float = 10.0,
-                           df_friend_extra: pd.DataFrame | None = None):
+def build_portfolio_curves(
+    df_alloc,
+    days: int = 60,
+    leverage: float = 10.0,
+    df_friend_extra: pd.DataFrame | None = None,
+    override_last_n_days: int = 3,   # NEW: apply editor stance to last N chart dates
+):
     """
     Returns:
       - model_curve: [date, value] indexed to 100 at start
       - friend_curve: [date, value] indexed to 100 at start
       - daily: [date, model, friend] USD notionals (10×)
+      - detail: per-coin rows (date, coin, model_dec, friend_dec, etc.)
     Friend stance = latest saved decision as-of each date (carry-forward),
-    optionally overridden by df_friend_extra (editor state) for the latest date.
+    optionally overridden by editor state for the last N chart dates.
     """
-    df_close = load_price_history(days)  # coin, date, close
-    df_pos   = load_wma_history(days)    # coin, date, position
-    df_friend = load_friend_decisions()  # coin, date, decision
+    df_close = load_price_history(days)
+    df_pos   = load_wma_history(days)
+    df_friend = load_friend_decisions()
 
-    if df_close.empty or df_pos.empty:
-        return (pd.DataFrame(columns=["date","value"]),
-                pd.DataFrame(columns=["date","value"]),
-                pd.DataFrame(columns=["date","model","friend"]))
+    # --- normalize & (optional) inject today's snapshot like before ---
+    # [keep your existing snapshot-injection code here if you added it]
 
-    # allocations: coin -> amount (units)
-    alloc_map = {str(r["coin"]).upper(): float(r["allocation_amount"] or 0.0)
-                 for _, r in (df_alloc.fillna(0)).iterrows()}
-
-    # Normalize types
     for dfx in (df_close, df_pos):
-        dfx["coin"] = dfx["coin"].astype(str).str.upper()
-        dfx["date"] = pd.to_datetime(dfx["date"], errors="coerce").dt.date
+        if not dfx.empty:
+            dfx["coin"] = dfx["coin"].astype(str).str.upper()
+            dfx["date"] = pd.to_datetime(dfx["date"], errors="coerce").dt.date
 
     if not df_friend.empty:
         df_friend = df_friend.copy()
@@ -265,29 +265,37 @@ def build_portfolio_curves(df_alloc, days: int = 60, leverage: float = 10.0,
     else:
         df_friend = pd.DataFrame(columns=["coin","date","decision"])
 
-    # If provided, inject inline decisions for the most recent trade date
-    if df_friend_extra is not None and not df_friend_extra.empty:
-        latest_trade_date = pd.to_datetime(
-            pd.merge(df_close[["date"]], df_pos[["date"]], how="inner")
-              .sort_values("date")["date"].iloc[-1]
-        ).date()
+    # ---------- build the (coin,date) grid we will plot ----------
+    df = (df_close.merge(df_pos, on=["coin","date"], how="inner")
+                 .sort_values(["coin","date"]))
+    if df.empty:
+        empty_curve = pd.DataFrame(columns=["date","value"])
+        empty_daily = pd.DataFrame(columns=["date","model","friend"])
+        empty_detail = pd.DataFrame(columns=["date","coin","model_dec","friend_dec",
+                                             "allocation","close","model_val","friend_val"])
+        return empty_curve, empty_curve, empty_daily, empty_detail
+
+    # ---------- APPLY EDITOR OVERRIDES TO LAST N DATES ----------
+    if df_friend_extra is not None and not df_friend_extra.empty and override_last_n_days > 0:
+        # last N unique dates in the chart grid
+        last_dates = (
+            pd.Series(pd.to_datetime(df["date"])).sort_values().dt.date.unique()[-override_last_n_days:]
+        )
         extra = (df_friend_extra.copy()
-                 .rename(columns={"friend_decision":"decision"})
-                 .assign(date=latest_trade_date))
+                 .rename(columns={"friend_decision": "decision"}))
         extra["coin"] = extra["coin"].astype(str).str.upper()
+
+        # cross-join coins × last_dates
+        extra = extra.assign(key=1).merge(
+            pd.DataFrame({"date": last_dates, "key": 1}), on="key"
+        ).drop(columns="key")
+
+        # append and keep the latest per (coin,date)
         df_friend = pd.concat([df_friend, extra[["coin","date","decision"]]], ignore_index=True)
         df_friend = (df_friend.sort_values(["coin","date"])
                               .drop_duplicates(["coin","date"], keep="last"))
 
-    # join close + model position per coin/date
-    df = (df_close.merge(df_pos, on=["coin","date"], how="inner")
-                 .sort_values(["coin","date"]))
-    if df.empty:
-        return (pd.DataFrame(columns=["date","value"]),
-                pd.DataFrame(columns=["date","value"]),
-                pd.DataFrame(columns=["date","model","friend"]))
-
-    # Build carried-forward friend decision across (coin,date) grid
+    # ---------- carry-forward friend decision across the grid ----------
     if df_friend.empty:
         df["friend_decision_eff"] = df["position"]
     else:
@@ -298,61 +306,56 @@ def build_portfolio_curves(df_alloc, days: int = 60, leverage: float = 10.0,
               .sort_values(["coin", "date"], kind="mergesort")
         )
         timeline["decision_cf"] = (
-            timeline.sort_values(["coin", "date"])
-                    .groupby("coin", as_index=False, group_keys=False)["decision"]
-                    .ffill()
+            timeline.groupby("coin", as_index=False, group_keys=False)["decision"].ffill()
         )
-        ff = timeline[timeline["_is_model_date"]][["coin", "date", "decision_cf"]]
+        ff = timeline[timeline["_is_model_date"]][["coin","date","decision_cf"]]
         df = df.merge(ff, on=["coin","date"], how="left")
         df["friend_decision_eff"] = df["decision_cf"].fillna(df["position"])
 
-    # compute daily notional per coin for model + friend
+    # ---------- compute per-coin and daily totals (unchanged) ----------
+    alloc_map = {str(r["coin"]).upper(): float(r["allocation_amount"] or 0.0)
+                 for _, r in (df_alloc.fillna(0)).iterrows()}
+
     rows = []
     for _, r in df.iterrows():
         coin = str(r["coin"]).upper()
         amt  = float(alloc_map.get(coin, 0.0))
-        if amt <= 0:
-            continue
+        if amt <= 0: continue
         close = float(r["close"]) if pd.notnull(r["close"]) else np.nan
-        if not np.isfinite(close):
-            continue
+        if not np.isfinite(close): continue
 
         model_dec  = str(r["position"])
         friend_dec = str(r["friend_decision_eff"])
         model_val  = close * amt * _ratio(model_dec)  * leverage
         friend_val = close * amt * _ratio(friend_dec) * leverage
 
-        rows.append({
-            "date": r["date"], "coin": coin, "close": close, "allocation": amt,
-            "model_dec": model_dec, "friend_dec": friend_dec,
-            "model_val": model_val, "friend_val": friend_val
-        })
+        rows.append({"date": r["date"], "coin": coin, "close": close, "allocation": amt,
+                     "model_dec": model_dec, "friend_dec": friend_dec,
+                     "model_val": model_val, "friend_val": friend_val})
 
     if not rows:
-        return (pd.DataFrame(columns=["date","value"]),
-                pd.DataFrame(columns=["date","value"]),
-                pd.DataFrame(columns=["date","model","friend"]),
-                pd.DataFrame(columns=["date","coin","model_dec","friend_dec",
-                                      "allocation","close","model_val","friend_val"]))
+        empty_curve = pd.DataFrame(columns=["date","value"])
+        empty_daily = pd.DataFrame(columns=["date","model","friend"])
+        empty_detail = pd.DataFrame(columns=["date","coin","model_dec","friend_dec",
+                                             "allocation","close","model_val","friend_val"])
+        return empty_curve, empty_curve, empty_daily, empty_detail
 
     detail = pd.DataFrame(rows).sort_values(["date","coin"])
-
     daily = (detail.groupby("date", as_index=False)[["model_val","friend_val"]]
                   .sum()
                   .rename(columns={"model_val":"model", "friend_val":"friend"})
                   .sort_values("date"))
 
-    # normalize to 100 at first non-zero
     def _normalize(col):
         s = daily[col].astype(float)
         base = float(s.iloc[0]) if len(s) else 0.0
-        if base == 0:
-            base = 1.0
+        if base == 0: base = 1.0
         return (s / base) * 100.0
 
     model_curve  = pd.DataFrame({"date": daily["date"], "value": _normalize("model")})
     friend_curve = pd.DataFrame({"date": daily["date"], "value": _normalize("friend")})
-    return model_curve, friend_curve, daily, detail   # ⬅️ now returning detail too
+    return model_curve, friend_curve, daily, detail
+
 
 
 def compute_decision_match_rate_alltime(df_alloc):
@@ -560,8 +563,9 @@ except Exception:
     friend_extra = df[["coin", "friend_decision"]]
 
 model_curve, friend_curve, daily, detail = build_portfolio_curves(
-    df_alloc, days=60, leverage=LEVERAGE, df_friend_extra=friend_extra
+    df_alloc, days=60, leverage=LEVERAGE, df_friend_extra=friend_extra, override_last_n_days=3
 )
+
 
 
 if model_curve.empty or friend_curve.empty:
