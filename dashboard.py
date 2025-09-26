@@ -317,18 +317,30 @@ def build_portfolio_curves(df_alloc, days: int = 60, leverage: float = 10.0,
         if not np.isfinite(close):
             continue
 
-        model_val  = close * amt * _ratio(str(r["position"]))            * leverage
-        friend_val = close * amt * _ratio(str(r["friend_decision_eff"])) * leverage
-        rows.append({"date": r["date"], "model": model_val, "friend": friend_val})
+        model_dec  = str(r["position"])
+        friend_dec = str(r["friend_decision_eff"])
+        model_val  = close * amt * _ratio(model_dec)  * leverage
+        friend_val = close * amt * _ratio(friend_dec) * leverage
+
+        rows.append({
+            "date": r["date"], "coin": coin, "close": close, "allocation": amt,
+            "model_dec": model_dec, "friend_dec": friend_dec,
+            "model_val": model_val, "friend_val": friend_val
+        })
 
     if not rows:
         return (pd.DataFrame(columns=["date","value"]),
                 pd.DataFrame(columns=["date","value"]),
-                pd.DataFrame(columns=["date","model","friend"]))
+                pd.DataFrame(columns=["date","model","friend"]),
+                pd.DataFrame(columns=["date","coin","model_dec","friend_dec",
+                                      "allocation","close","model_val","friend_val"]))
 
-    daily = (pd.DataFrame(rows)
-                .groupby("date", as_index=False)[["model","friend"]].sum()
-                .sort_values("date"))
+    detail = pd.DataFrame(rows).sort_values(["date","coin"])
+
+    daily = (detail.groupby("date", as_index=False)[["model_val","friend_val"]]
+                  .sum()
+                  .rename(columns={"model_val":"model", "friend_val":"friend"})
+                  .sort_values("date"))
 
     # normalize to 100 at first non-zero
     def _normalize(col):
@@ -340,7 +352,8 @@ def build_portfolio_curves(df_alloc, days: int = 60, leverage: float = 10.0,
 
     model_curve  = pd.DataFrame({"date": daily["date"], "value": _normalize("model")})
     friend_curve = pd.DataFrame({"date": daily["date"], "value": _normalize("friend")})
-    return model_curve, friend_curve, daily
+    return model_curve, friend_curve, daily, detail   # ⬅️ now returning detail too
+
 
 def compute_decision_match_rate_alltime(df_alloc):
     """
@@ -546,9 +559,10 @@ try:
 except Exception:
     friend_extra = df[["coin", "friend_decision"]]
 
-model_curve, friend_curve, daily = build_portfolio_curves(
+model_curve, friend_curve, daily, detail = build_portfolio_curves(
     df_alloc, days=60, leverage=LEVERAGE, df_friend_extra=friend_extra
 )
+
 
 if model_curve.empty or friend_curve.empty:
     st.info("Not enough history yet to draw the comparison chart.")
@@ -587,3 +601,25 @@ else:
     for spine in ("top","right"):
         ax.spines[spine].set_visible(False)
     st.pyplot(fig, clear_figure=True)
+
+# --- Diagnostics: show where the lines should differ on the last 7 chart dates
+if not detail.empty:
+    last_dates = (pd.to_datetime(detail["date"]).sort_values().unique())[-7:]
+    diff_rows = detail[
+        (pd.to_datetime(detail["date"]).isin(last_dates)) &
+        (detail["allocation"] > 0) &
+        (detail["model_dec"].astype(str) != detail["friend_dec"].astype(str))
+    ].copy()
+
+    st.caption("Differences used for the chart (last 7 dates, non-zero allocation):")
+    if diff_rows.empty:
+        st.write("No per-coin stance differences detected on the plotted dates.")
+    else:
+        diff_rows = diff_rows.sort_values(["date","coin"])
+        diff_rows["date"] = pd.to_datetime(diff_rows["date"]).dt.date
+        diff_rows["Δ_notional"] = (diff_rows["friend_val"] - diff_rows["model_val"]).round(2)
+        st.dataframe(
+            diff_rows[["date","coin","allocation","model_dec","friend_dec","close","Δ_notional"]],
+            use_container_width=True
+        )
+
