@@ -357,7 +357,7 @@ def build_telegram_message(
         f"Lagging span: {ichi_details['lagging_span']}",
         ichi_details["conversion_vs_base"],
         ichi_details["cloud_position"],
-        ichi_details["current_cloud"],
+        ichi_details.get("current_cloud", "Current cloud: unknown"),
         ichi_details["future_cloud"],
     ])
     return "\n".join(lines)
