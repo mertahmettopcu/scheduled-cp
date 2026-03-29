@@ -1,11 +1,12 @@
 name: Crypto Futures Pipeline (VPN)
 
 on:
-  schedule:
-    # - cron: "*/15 * * * *"   # her 15 dakikada bir
   workflow_dispatch:
   push:
-    branches: [ main ]
+    branches:
+      - main
+  schedule:
+    - cron: '*/15 * * * *'
 
 jobs:
   vpn-job:
@@ -19,7 +20,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
 
       - name: Install OpenVPN
         run: |
@@ -39,21 +40,19 @@ jobs:
       - name: Create OVPN file
         shell: bash
         env:
-          VPN_OVPN_B64: ${{ secrets.VPN_OVPN_B64 }}
           VPN_OVPN: ${{ secrets.VPN_OVPN }}
         run: |
           set -euo pipefail
-          if [ -n "${VPN_OVPN_B64:-}" ]; then
-            echo "$VPN_OVPN_B64" | base64 -d > vpnbook.ovpn
-          elif [ -n "${VPN_OVPN:-}" ]; then
-            printf '%s' "$VPN_OVPN" > vpnbook.ovpn
-          else
-            echo "::error ::Missing VPN_OVPN_B64 or VPN_OVPN secret."
+          if [ -z "${VPN_OVPN:-}" ]; then
+            echo "::error ::Missing VPN_OVPN secret."
             exit 1
           fi
+          printf '%s' "$VPN_OVPN" > vpnbook.ovpn
           grep -qi '^auth-user-pass' vpnbook.ovpn || echo 'auth-user-pass vpn-auth.txt' >> vpnbook.ovpn
           grep -qi '^auth-nocache' vpnbook.ovpn || echo 'auth-nocache' >> vpnbook.ovpn
           grep -qi '^remote-cert-tls' vpnbook.ovpn || echo 'remote-cert-tls server' >> vpnbook.ovpn
+          grep -qi '^pull-filter ignore "block-outside-dns"' vpnbook.ovpn || echo 'pull-filter ignore "block-outside-dns"' >> vpnbook.ovpn
+          grep -qi '^allow-compression no' vpnbook.ovpn || echo 'allow-compression no' >> vpnbook.ovpn
           chmod 600 vpnbook.ovpn
 
       - name: Create VPN auth
@@ -65,8 +64,7 @@ jobs:
           set -euo pipefail
           echo "::add-mask::$VPN_USER"
           echo "::add-mask::$VPN_PASS"
-          printf '%s\n%s\n' "$(printf '%s' "$VPN_USER" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')" \
-                             "$(printf '%s' "$VPN_PASS" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')" > vpn-auth.txt
+          printf '%s\n%s\n' "$VPN_USER" "$VPN_PASS" > vpn-auth.txt
           chmod 600 vpn-auth.txt
 
       - name: Connect to VPNBook
@@ -76,7 +74,7 @@ jobs:
           sudo openvpn --config vpnbook.ovpn --auth-user-pass vpn-auth.txt --daemon --writepid /tmp/ovpn.pid --log /tmp/ovpn.log
           for i in {1..30}; do
             if sudo grep -q 'AUTH_FAILED' /tmp/ovpn.log; then
-              echo "::error ::VPN login failed. Update VPN_PASS."
+              echo "::error ::VPN login failed."
               sudo tail -n +1 /tmp/ovpn.log || true
               exit 1
             fi
@@ -95,17 +93,16 @@ jobs:
       - name: Verify public IP
         run: |
           echo "Public IP after VPN:"
-          curl -s https://api.ipify.org || true
+          curl --max-time 20 -s https://api.ipify.org || true
           echo
 
       - name: Check Binance Futures connectivity
         run: |
           python - <<'PY'
           import requests
-          url = "https://fapi.binance.com/fapi/v1/ping"
-          r = requests.get(url, timeout=20)
+          r = requests.get("https://fapi.binance.com/fapi/v1/ping", timeout=10)
           print("Status:", r.status_code)
-          print("Body:", r.text[:500])
+          print("Body:", r.text[:200])
           r.raise_for_status()
           PY
 
@@ -113,7 +110,7 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-          PYTHONUNBUFFERED: "1"
+          PYTHONUNBUFFERED: '1'
         run: python -u crypto_futures_pipeline_v2.py
 
       - name: Disconnect OpenVPN
