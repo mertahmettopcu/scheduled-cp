@@ -34,6 +34,8 @@ from supabase import Client, create_client
 # ==================== Config ====================
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+STREAMLIT_APP_URL = os.getenv("STREAMLIT_APP_URL", "")
+DISPLAY_TZ = "Europe/Istanbul"
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
@@ -306,14 +308,30 @@ def build_telegram_message(
     row_1d: pd.Series,
     signal_1d: str,
     ichi_details: dict,
+    candle_time_15m: str,
+    candle_time_1h: str,
+    candle_time_1d: str,
 ) -> str:
     def fmt(x):
         if pd.isna(x):
             return "NA"
         return f"{x:.4f}"
 
+    app_link = _build_app_link(pair)
+
     lines = [
         f"{pair}",
+        f"15m candle: {_format_candle_time_for_message(candle_time_15m)}",
+        f"1h candle: {_format_candle_time_for_message(candle_time_1h)}",
+        f"1d candle: {_format_candle_time_for_message(candle_time_1d)}",
+    ]
+
+    if app_link:
+        lines.extend([
+            f"Chart: {app_link}",
+        ])
+
+    lines.extend([
         "",
         f"15m: {signal_15m}",
         f"Close: {fmt(row_15m['close'])}",
@@ -331,7 +349,7 @@ def build_telegram_message(
         ichi_details["conversion_vs_base"],
         ichi_details["cloud_position"],
         ichi_details["future_cloud"],
-    ]
+    ])
     return "\n".join(lines)
 
 
@@ -447,6 +465,20 @@ def _safe_float(v):
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
+def _format_candle_time_for_message(iso_ts: str) -> str:
+    ts = pd.Timestamp(iso_ts)
+    if ts.tzinfo is None:
+        ts = ts.tz_localize("UTC")
+    ts = ts.tz_convert(DISPLAY_TZ)
+    return ts.strftime("%Y-%m-%d %H:%M %Z")
+
+
+def _build_app_link(pair: str) -> str:
+    if not STREAMLIT_APP_URL:
+        return ""
+    separator = "&" if "?" in STREAMLIT_APP_URL else "?"
+    return f"{STREAMLIT_APP_URL}{separator}pair={pair}"
+
 
 def _signal_reason(last: pd.Series) -> str:
     if bool(last.get("long_signal", False)):
@@ -526,6 +558,9 @@ def run() -> None:
                 row_1d=latest_1d,
                 signal_1d=snap_1d["signal"],
                 ichi_details=ichi_details,
+                candle_time_15m=snap_15m["last_open_time"],
+                candle_time_1h=snap_1h["last_open_time"],
+                candle_time_1d=snap_1d["last_open_time"],
             )
             send_telegram_message(message)
             log(f"  └─ 📨 Telegram sent for {pair}")
