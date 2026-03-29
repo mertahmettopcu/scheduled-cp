@@ -185,14 +185,18 @@ def add_ichimoku(df: pd.DataFrame) -> pd.DataFrame:
     low_26 = out["low"].rolling(26).min()
     out["kijun"] = (high_26 + low_26) / 2
 
-    out["senkou_a"] = ((out["tenkan"] + out["kijun"]) / 2).shift(26)
-
     high_52 = out["high"].rolling(52).max()
     low_52 = out["low"].rolling(52).min()
-    out["senkou_b"] = ((high_52 + low_52) / 2).shift(26)
+
+    # unshifted future cloud base values
+    out["senkou_a_base"] = (out["tenkan"] + out["kijun"]) / 2
+    out["senkou_b_base"] = (high_52 + low_52) / 2
+
+    # standard plotted / aligned values
+    out["senkou_a"] = out["senkou_a_base"].shift(26)
+    out["senkou_b"] = out["senkou_b_base"].shift(26)
 
     out["chikou"] = out["close"].shift(-26)
-
     return out
 
 
@@ -278,9 +282,7 @@ def make_ichimoku_chart(df: pd.DataFrame, title: str) -> go.Figure:
         )
     )
 
-    # Senkou A / Senkou B
-    # Not: bunlar add_ichimoku() içinde zaten shift(26) ile hesaplandı.
-    # O yüzden burada ekstra future_time kullanmıyoruz.
+    # Current/aligned Senkou A / B
     fig.add_trace(
         go.Scatter(
             x=plot_df["display_time"],
@@ -300,7 +302,7 @@ def make_ichimoku_chart(df: pd.DataFrame, title: str) -> go.Figure:
         )
     )
 
-    # Cloud fill
+    # Current cloud fill
     fig.add_trace(
         go.Scatter(
             x=plot_df["display_time"],
@@ -333,6 +335,58 @@ def make_ichimoku_chart(df: pd.DataFrame, title: str) -> go.Figure:
         )
     )
 
+    # -------------------------------------------------
+    # Future 26-day cloud projection
+    # -------------------------------------------------
+    future_src = plot_df.tail(26).copy()
+    future_src["future_time"] = future_src["display_time"] + pd.Timedelta(days=26)
+
+    fig.add_trace(
+        go.Scatter(
+            x=future_src["future_time"],
+            y=future_src["senkou_a_base"],
+            mode="lines",
+            name="Future Senkou A",
+            line=dict(width=2, dash="dot"),
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=future_src["future_time"],
+            y=future_src["senkou_b_base"],
+            mode="lines",
+            name="Future Senkou B",
+            line=dict(width=2, dash="dot"),
+        )
+    )
+
+    # Future cloud fill
+    fig.add_trace(
+        go.Scatter(
+            x=future_src["future_time"],
+            y=future_src["senkou_a_base"],
+            mode="lines",
+            line=dict(width=0),
+            showlegend=False,
+            hoverinfo="skip",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=future_src["future_time"],
+            y=future_src["senkou_b_base"],
+            mode="lines",
+            line=dict(width=0),
+            fill="tonexty",
+            name="Future Cloud",
+            hoverinfo="skip",
+        )
+    )
+
+    # Extend x-axis 26 more days
+    x_min = plot_df["display_time"].min()
+    x_max = plot_df["display_time"].max() + pd.Timedelta(days=26)
+
     fig.update_layout(
         title=title,
         xaxis_title="Date",
@@ -347,8 +401,9 @@ def make_ichimoku_chart(df: pd.DataFrame, title: str) -> go.Figure:
         legend_x=0,
     )
 
-    return fig
+    fig.update_xaxes(range=[x_min, x_max])
 
+    return fig
 
 # =========================================================
 # UI
