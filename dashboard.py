@@ -256,7 +256,7 @@ def make_ichimoku_chart(df: pd.DataFrame, title: str) -> go.Figure:
     future_src["senkou_a"] = future_src["senkou_a_base"]
     future_src["senkou_b"] = future_src["senkou_b_base"]
 
-    # Merge visible cloud + future cloud into one continuous cloud dataframe
+    # Visible cloud + future cloud together
     cloud_df = pd.concat(
         [
             plot_df[["display_time", "senkou_a", "senkou_b"]],
@@ -264,13 +264,6 @@ def make_ichimoku_chart(df: pd.DataFrame, title: str) -> go.Figure:
         ],
         ignore_index=True,
     ).drop_duplicates(subset=["display_time"]).sort_values("display_time").reset_index(drop=True)
-
-    # bullish / bearish masks
-    cloud_df["bullish_a"] = cloud_df["senkou_a"].where(cloud_df["senkou_a"] >= cloud_df["senkou_b"])
-    cloud_df["bullish_b"] = cloud_df["senkou_b"].where(cloud_df["senkou_a"] >= cloud_df["senkou_b"])
-
-    cloud_df["bearish_a"] = cloud_df["senkou_a"].where(cloud_df["senkou_a"] < cloud_df["senkou_b"])
-    cloud_df["bearish_b"] = cloud_df["senkou_b"].where(cloud_df["senkou_a"] < cloud_df["senkou_b"])
 
     fig = go.Figure()
 
@@ -312,7 +305,7 @@ def make_ichimoku_chart(df: pd.DataFrame, title: str) -> go.Figure:
         )
     )
 
-    # Senkou outlines (continuous including future)
+    # Senkou outlines
     fig.add_trace(
         go.Scatter(
             x=cloud_df["display_time"],
@@ -332,53 +325,45 @@ def make_ichimoku_chart(df: pd.DataFrame, title: str) -> go.Figure:
         )
     )
 
-    # Bullish cloud fill (green)
-    fig.add_trace(
-        go.Scatter(
-            x=cloud_df["display_time"],
-            y=cloud_df["bullish_a"],
-            mode="lines",
-            line=dict(width=0),
-            showlegend=False,
-            hoverinfo="skip",
-        )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=cloud_df["display_time"],
-            y=cloud_df["bullish_b"],
-            mode="lines",
-            line=dict(width=0),
-            fill="tonexty",
-            fillcolor="rgba(0, 200, 0, 0.18)",
-            name="Bullish Cloud",
-            hoverinfo="skip",
-        )
-    )
+    # -------- segmented cloud fill helper --------
+    def add_cloud_segments(mask, fillcolor, name):
+        segment_id = (mask != mask.shift()).cumsum()
 
-    # Bearish cloud fill (red)
-    fig.add_trace(
-        go.Scatter(
-            x=cloud_df["display_time"],
-            y=cloud_df["bearish_a"],
-            mode="lines",
-            line=dict(width=0),
-            showlegend=False,
-            hoverinfo="skip",
-        )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=cloud_df["display_time"],
-            y=cloud_df["bearish_b"],
-            mode="lines",
-            line=dict(width=0),
-            fill="tonexty",
-            fillcolor="rgba(220, 0, 0, 0.18)",
-            name="Bearish Cloud",
-            hoverinfo="skip",
-        )
-    )
+        first_segment = True
+        for _, seg in cloud_df[mask].groupby(segment_id[mask]):
+            if len(seg) < 2:
+                continue
+
+            fig.add_trace(
+                go.Scatter(
+                    x=seg["display_time"],
+                    y=seg["senkou_a"],
+                    mode="lines",
+                    line=dict(width=0),
+                    showlegend=False,
+                    hoverinfo="skip",
+                )
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=seg["display_time"],
+                    y=seg["senkou_b"],
+                    mode="lines",
+                    line=dict(width=0),
+                    fill="tonexty",
+                    fillcolor=fillcolor,
+                    name=name if first_segment else None,
+                    showlegend=first_segment,
+                    hoverinfo="skip",
+                )
+            )
+            first_segment = False
+
+    bullish_mask = cloud_df["senkou_a"] >= cloud_df["senkou_b"]
+    bearish_mask = cloud_df["senkou_a"] < cloud_df["senkou_b"]
+
+    add_cloud_segments(bullish_mask, "rgba(0, 200, 0, 0.18)", "Bullish Cloud")
+    add_cloud_segments(bearish_mask, "rgba(220, 0, 0, 0.18)", "Bearish Cloud")
 
     x_min = plot_df["display_time"].min()
     x_max = plot_df["display_time"].max() + pd.Timedelta(days=26)
