@@ -294,6 +294,11 @@ def classify_ichimoku_signal(df: pd.DataFrame) -> tuple[str, dict]:
             else "Conversion line = Base line"
         ),
         "cloud_position": f"Close: {cloud_pos}",
+        "current_cloud": (
+            "Current cloud: green" if row["senkou_a"] > row["senkou_b"]
+            else "Current cloud: red" if row["senkou_a"] < row["senkou_b"]
+            else "Current cloud: flat"
+        ),
         "future_cloud": f"Future cloud: {future_color}",
     }
     return signal, details
@@ -311,11 +316,17 @@ def build_telegram_message(
     candle_time_15m: str,
     candle_time_1h: str,
     candle_time_1d: str,
+    triggered_15m: bool = False,
+    triggered_1h: bool = False,
+    triggered_1d: bool = False,
 ) -> str:
     def fmt(x):
         if pd.isna(x):
             return "NA"
         return f"{x:.4f}"
+
+    def sig_label(sig: str, triggered: bool) -> str:
+        return f"{sig} (triggered)" if triggered else sig
 
     app_link = _build_app_link(pair)
 
@@ -327,31 +338,29 @@ def build_telegram_message(
     ]
 
     if app_link:
-        lines.extend([
-            f"Chart: {app_link}",
-        ])
+        lines.append(f"Chart: {app_link}")
 
     lines.extend([
         "",
-        f"15m: {signal_15m}",
+        f"15m: {sig_label(signal_15m, triggered_15m)}",
         f"Close: {fmt(row_15m['close'])}",
         "EMA4 > EMA16" if row_15m["ema4"] > row_15m["ema16"] else "EMA4 < EMA16" if row_15m["ema4"] < row_15m["ema16"] else "EMA4 = EMA16",
         "RSI14 > RSI52" if row_15m["rsi14"] > row_15m["rsi52"] else "RSI14 < RSI52" if row_15m["rsi14"] < row_15m["rsi52"] else "RSI14 = RSI52",
         "",
-        f"1h: {signal_1h}",
+        f"1h: {sig_label(signal_1h, triggered_1h)}",
         f"Close: {fmt(row_1h['close'])}",
         "EMA4 > EMA16" if row_1h["ema4"] > row_1h["ema16"] else "EMA4 < EMA16" if row_1h["ema4"] < row_1h["ema16"] else "EMA4 = EMA16",
         "RSI14 > RSI52" if row_1h["rsi14"] > row_1h["rsi52"] else "RSI14 < RSI52" if row_1h["rsi14"] < row_1h["rsi52"] else "RSI14 = RSI52",
         "",
-        f"1d: {signal_1d}",
+        f"1d: {sig_label(signal_1d, triggered_1d)}",
         f"Close: {fmt(row_1d['close'])}",
         f"Lagging span: {ichi_details['lagging_span']}",
         ichi_details["conversion_vs_base"],
         ichi_details["cloud_position"],
+        ichi_details["current_cloud"],
         ichi_details["future_cloud"],
     ])
     return "\n".join(lines)
-
 
 def signal_changed(prev_value: str | None, new_value: str) -> bool:
     prev_norm = (prev_value or "").strip().upper()
@@ -549,7 +558,7 @@ def run() -> None:
                 "future_cloud": snap_1d.get("ichimoku_future_cloud", "unknown"),
             }
 
-            message = build_telegram_message(
+           message = build_telegram_message(
                 pair=pair,
                 row_15m=latest_15m,
                 signal_15m=snap_15m["signal"],
@@ -561,6 +570,9 @@ def run() -> None:
                 candle_time_15m=snap_15m["last_open_time"],
                 candle_time_1h=snap_1h["last_open_time"],
                 candle_time_1d=snap_1d["last_open_time"],
+                triggered_15m=changed_15m,
+                triggered_1h=changed_1h,
+                triggered_1d=changed_1d,
             )
             send_telegram_message(message)
             log(f"  └─ 📨 Telegram sent for {pair}")
