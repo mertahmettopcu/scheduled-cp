@@ -250,6 +250,28 @@ def make_ichimoku_chart(df: pd.DataFrame, title: str) -> go.Figure:
     plot_df = df.copy()
     plot_df["display_time"] = plot_df["open_time"].dt.tz_convert(DISPLAY_TZ)
 
+    # Future 26-day extension using unshifted values
+    future_src = plot_df.tail(26).copy()
+    future_src["display_time"] = future_src["display_time"] + pd.Timedelta(days=26)
+    future_src["senkou_a"] = future_src["senkou_a_base"]
+    future_src["senkou_b"] = future_src["senkou_b_base"]
+
+    # Merge visible cloud + future cloud into one continuous cloud dataframe
+    cloud_df = pd.concat(
+        [
+            plot_df[["display_time", "senkou_a", "senkou_b"]],
+            future_src[["display_time", "senkou_a", "senkou_b"]],
+        ],
+        ignore_index=True,
+    ).drop_duplicates(subset=["display_time"]).sort_values("display_time").reset_index(drop=True)
+
+    # bullish / bearish masks
+    cloud_df["bullish_a"] = cloud_df["senkou_a"].where(cloud_df["senkou_a"] >= cloud_df["senkou_b"])
+    cloud_df["bullish_b"] = cloud_df["senkou_b"].where(cloud_df["senkou_a"] >= cloud_df["senkou_b"])
+
+    cloud_df["bearish_a"] = cloud_df["senkou_a"].where(cloud_df["senkou_a"] < cloud_df["senkou_b"])
+    cloud_df["bearish_b"] = cloud_df["senkou_b"].where(cloud_df["senkou_a"] < cloud_df["senkou_b"])
+
     fig = go.Figure()
 
     # Price
@@ -264,7 +286,7 @@ def make_ichimoku_chart(df: pd.DataFrame, title: str) -> go.Figure:
         )
     )
 
-    # Tenkan / Kijun
+    # Tenkan / Kijun / Chikou
     fig.add_trace(
         go.Scatter(
             x=plot_df["display_time"],
@@ -281,51 +303,6 @@ def make_ichimoku_chart(df: pd.DataFrame, title: str) -> go.Figure:
             name="Kijun",
         )
     )
-
-    # Current/aligned Senkou A / B
-    fig.add_trace(
-        go.Scatter(
-            x=plot_df["display_time"],
-            y=plot_df["senkou_a"],
-            mode="lines",
-            name="Senkou A",
-            line=dict(width=2),
-        )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=plot_df["display_time"],
-            y=plot_df["senkou_b"],
-            mode="lines",
-            name="Senkou B",
-            line=dict(width=2),
-        )
-    )
-
-    # Current cloud fill
-    fig.add_trace(
-        go.Scatter(
-            x=plot_df["display_time"],
-            y=plot_df["senkou_a"],
-            mode="lines",
-            line=dict(width=0),
-            showlegend=False,
-            hoverinfo="skip",
-        )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=plot_df["display_time"],
-            y=plot_df["senkou_b"],
-            mode="lines",
-            line=dict(width=0),
-            fill="tonexty",
-            name="Cloud",
-            hoverinfo="skip",
-        )
-    )
-
-    # Chikou
     fig.add_trace(
         go.Scatter(
             x=plot_df["display_time"],
@@ -335,36 +312,31 @@ def make_ichimoku_chart(df: pd.DataFrame, title: str) -> go.Figure:
         )
     )
 
-    # -------------------------------------------------
-    # Future 26-day cloud projection
-    # -------------------------------------------------
-    future_src = plot_df.tail(26).copy()
-    future_src["future_time"] = future_src["display_time"] + pd.Timedelta(days=26)
-
+    # Senkou outlines (continuous including future)
     fig.add_trace(
         go.Scatter(
-            x=future_src["future_time"],
-            y=future_src["senkou_a_base"],
+            x=cloud_df["display_time"],
+            y=cloud_df["senkou_a"],
             mode="lines",
-            name="Future Senkou A",
-            line=dict(width=2, dash="dot"),
+            name="Senkou A",
+            line=dict(width=2),
         )
     )
     fig.add_trace(
         go.Scatter(
-            x=future_src["future_time"],
-            y=future_src["senkou_b_base"],
+            x=cloud_df["display_time"],
+            y=cloud_df["senkou_b"],
             mode="lines",
-            name="Future Senkou B",
-            line=dict(width=2, dash="dot"),
+            name="Senkou B",
+            line=dict(width=2),
         )
     )
 
-    # Future cloud fill
+    # Bullish cloud fill (green)
     fig.add_trace(
         go.Scatter(
-            x=future_src["future_time"],
-            y=future_src["senkou_a_base"],
+            x=cloud_df["display_time"],
+            y=cloud_df["bullish_a"],
             mode="lines",
             line=dict(width=0),
             showlegend=False,
@@ -373,17 +345,41 @@ def make_ichimoku_chart(df: pd.DataFrame, title: str) -> go.Figure:
     )
     fig.add_trace(
         go.Scatter(
-            x=future_src["future_time"],
-            y=future_src["senkou_b_base"],
+            x=cloud_df["display_time"],
+            y=cloud_df["bullish_b"],
             mode="lines",
             line=dict(width=0),
             fill="tonexty",
-            name="Future Cloud",
+            fillcolor="rgba(0, 200, 0, 0.18)",
+            name="Bullish Cloud",
             hoverinfo="skip",
         )
     )
 
-    # Extend x-axis 26 more days
+    # Bearish cloud fill (red)
+    fig.add_trace(
+        go.Scatter(
+            x=cloud_df["display_time"],
+            y=cloud_df["bearish_a"],
+            mode="lines",
+            line=dict(width=0),
+            showlegend=False,
+            hoverinfo="skip",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=cloud_df["display_time"],
+            y=cloud_df["bearish_b"],
+            mode="lines",
+            line=dict(width=0),
+            fill="tonexty",
+            fillcolor="rgba(220, 0, 0, 0.18)",
+            name="Bearish Cloud",
+            hoverinfo="skip",
+        )
+    )
+
     x_min = plot_df["display_time"].min()
     x_max = plot_df["display_time"].max() + pd.Timedelta(days=26)
 
@@ -400,11 +396,9 @@ def make_ichimoku_chart(df: pd.DataFrame, title: str) -> go.Figure:
         legend_xanchor="left",
         legend_x=0,
     )
-
     fig.update_xaxes(range=[x_min, x_max])
 
     return fig
-
 # =========================================================
 # UI
 # =========================================================
