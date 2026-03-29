@@ -8,3 +8,4 @@ numpy
 python-binance
 python-telegram-bot
 matplotlib>=3.7.0
+plotly>=5.24.0
