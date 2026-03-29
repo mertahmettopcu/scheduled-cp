@@ -2,7 +2,7 @@ name: Crypto Futures Pipeline (VPN)
 
 on:
   schedule:
-    - cron: "*/15 * * * *"   # her 15 dakikada bir
+    # - cron: "*/15 * * * *"   # her 15 dakikada bir
   workflow_dispatch:
   push:
     branches: [ main ]
