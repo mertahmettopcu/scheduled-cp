@@ -245,10 +245,10 @@ def make_price_ema_chart(df: pd.DataFrame, title: str) -> go.Figure:
 def make_ichimoku_chart(df: pd.DataFrame, title: str) -> go.Figure:
     plot_df = df.copy()
     plot_df["display_time"] = plot_df["open_time"].dt.tz_convert(DISPLAY_TZ)
-    plot_df["future_time"] = plot_df["open_time"].dt.tz_convert(DISPLAY_TZ) + pd.Timedelta(days=26)
 
     fig = go.Figure()
 
+    # Price
     fig.add_trace(
         go.Candlestick(
             x=plot_df["display_time"],
@@ -260,6 +260,7 @@ def make_ichimoku_chart(df: pd.DataFrame, title: str) -> go.Figure:
         )
     )
 
+    # Tenkan / Kijun
     fig.add_trace(
         go.Scatter(
             x=plot_df["display_time"],
@@ -277,9 +278,12 @@ def make_ichimoku_chart(df: pd.DataFrame, title: str) -> go.Figure:
         )
     )
 
+    # Senkou A / Senkou B
+    # Not: bunlar add_ichimoku() içinde zaten shift(26) ile hesaplandı.
+    # O yüzden burada ekstra future_time kullanmıyoruz.
     fig.add_trace(
         go.Scatter(
-            x=plot_df["future_time"],
+            x=plot_df["display_time"],
             y=plot_df["senkou_a"],
             mode="lines",
             name="Senkou A",
@@ -288,7 +292,7 @@ def make_ichimoku_chart(df: pd.DataFrame, title: str) -> go.Figure:
     )
     fig.add_trace(
         go.Scatter(
-            x=plot_df["future_time"],
+            x=plot_df["display_time"],
             y=plot_df["senkou_b"],
             mode="lines",
             name="Senkou B",
@@ -296,19 +300,10 @@ def make_ichimoku_chart(df: pd.DataFrame, title: str) -> go.Figure:
         )
     )
 
-    fig.add_trace(
-        go.Scatter(
-            x=plot_df["display_time"],
-            y=plot_df["chikou"],
-            mode="lines",
-            name="Chikou",
-        )
-    )
-
     # Cloud fill
     fig.add_trace(
         go.Scatter(
-            x=plot_df["future_time"],
+            x=plot_df["display_time"],
             y=plot_df["senkou_a"],
             mode="lines",
             line=dict(width=0),
@@ -318,7 +313,7 @@ def make_ichimoku_chart(df: pd.DataFrame, title: str) -> go.Figure:
     )
     fig.add_trace(
         go.Scatter(
-            x=plot_df["future_time"],
+            x=plot_df["display_time"],
             y=plot_df["senkou_b"],
             mode="lines",
             line=dict(width=0),
@@ -328,8 +323,15 @@ def make_ichimoku_chart(df: pd.DataFrame, title: str) -> go.Figure:
         )
     )
 
-    x_min = plot_df["display_time"].min()
-    x_max = plot_df["display_time"].max() + pd.Timedelta(days=26)
+    # Chikou
+    fig.add_trace(
+        go.Scatter(
+            x=plot_df["display_time"],
+            y=plot_df["chikou"],
+            mode="lines",
+            name="Chikou",
+        )
+    )
 
     fig.update_layout(
         title=title,
@@ -344,7 +346,6 @@ def make_ichimoku_chart(df: pd.DataFrame, title: str) -> go.Figure:
         legend_xanchor="left",
         legend_x=0,
     )
-    fig.update_xaxes(range=[x_min, x_max])
 
     return fig
 
