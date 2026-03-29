@@ -558,7 +558,7 @@ def run() -> None:
                 "future_cloud": snap_1d.get("ichimoku_future_cloud", "unknown"),
             }
 
-           message = build_telegram_message(
+            message = build_telegram_message(
                 pair=pair,
                 row_15m=latest_15m,
                 signal_15m=snap_15m["signal"],
