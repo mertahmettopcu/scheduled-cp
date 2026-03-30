@@ -37,7 +37,8 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 STREAMLIT_APP_URL = os.getenv("STREAMLIT_APP_URL", "")
 DISPLAY_TZ = "Europe/Istanbul"
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+TELEGRAM_CHAT_IDS_RAW = os.getenv("TELEGRAM_CHAT_IDS", "")
+TELEGRAM_CHAT_IDS = [x.strip() for x in TELEGRAM_CHAT_IDS_RAW.split(",") if x.strip()]
 
 if not SUPABASE_URL or not SUPABASE_KEY:
     raise SystemExit("Missing SUPABASE_URL or SUPABASE_KEY")
@@ -179,14 +180,21 @@ def add_ichimoku(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def send_telegram_message(text: str) -> None:
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_IDS:
         print("Telegram credentials missing, skipping Telegram send.")
         return
 
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text}
-    r = requests.post(url, json=payload, timeout=20)
-    r.raise_for_status()
+
+    for chat_id in TELEGRAM_CHAT_IDS:
+        payload = {
+            "chat_id": chat_id,
+            "text": text
+        }
+
+        r = requests.post(url, json=payload, timeout=20)
+        r.raise_for_status()
+        print(f"Telegram sent to chat_id={chat_id}")
 
 
 def classify_ema_rsi_signal(row: pd.Series) -> str:
