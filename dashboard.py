@@ -63,7 +63,7 @@ def _fmt_display_time(ts):
     ts = _to_display_time(ts)
     if ts is None:
         return None
-    return ts.strftime("%Y-%m-%d %H:%M %Z")
+    return ts.strftime("%Y-%m-%d %H:%M")
 
 
 def _safe_round(value, digits=4):
@@ -409,83 +409,46 @@ hourly_chart = hourly.tail(48).copy()
 m15_chart = m15.tail(96).copy()
 daily_chart = daily.tail(220).copy()
 
-# =========================================================
-# Snapshot-based latest panels
-# =========================================================
-snap_1h = snapshots[snapshots["timeframe"] == "1h"]
-snap_15m = snapshots[snapshots["timeframe"] == "15m"]
-snap_1d = snapshots[snapshots["timeframe"] == "1d"]
-
-c1, c2, c3 = st.columns(3)
-
-with c1:
-    st.markdown("**1H latest**")
-    if not snap_1h.empty:
-        row = snap_1h.iloc[0]
-        st.write({
-            "last_open_time": _fmt_display_time(row.get("last_open_time")),
-            "close": _safe_round(row.get("close"), 4),
-            "ema4": _safe_round(row.get("ema4"), 4),
-            "ema16": _safe_round(row.get("ema16"), 4),
-            "ema65": _safe_round(row.get("ema65"), 4),
-            "ema120": _safe_round(row.get("ema120"), 4),
-            "rsi14": _safe_round(row.get("rsi14"), 2),
-            "rsi52": _safe_round(row.get("rsi52"), 2),
-            "signal": row.get("signal"),
-        })
-    else:
-        st.info("1H snapshot bulunamadı.")
-
-with c2:
-    st.markdown("**15M latest**")
-    if not snap_15m.empty:
-        row = snap_15m.iloc[0]
-        st.write({
-            "last_open_time": _fmt_display_time(row.get("last_open_time")),
-            "close": _safe_round(row.get("close"), 4),
-            "ema4": _safe_round(row.get("ema4"), 4),
-            "ema16": _safe_round(row.get("ema16"), 4),
-            "ema65": _safe_round(row.get("ema65"), 4),
-            "ema120": _safe_round(row.get("ema120"), 4),
-            "rsi14": _safe_round(row.get("rsi14"), 2),
-            "rsi52": _safe_round(row.get("rsi52"), 2),
-            "signal": row.get("signal"),
-        })
-    else:
-        st.info("15M snapshot bulunamadı.")
-
-with c3:
-    st.markdown("**1D Ichimoku latest**")
-    if not snap_1d.empty:
-        row = snap_1d.iloc[0]
-        st.write({
-            "last_open_time": _fmt_display_time(row.get("last_open_time")),
-            "close": _safe_round(row.get("close"), 4),
-            "tenkan": _safe_round(row.get("tenkan"), 4),
-            "kijun": _safe_round(row.get("kijun"), 4),
-            "senkou_a": _safe_round(row.get("senkou_a"), 4),
-            "senkou_b": _safe_round(row.get("senkou_b"), 4),
-            "chikou": _safe_round(row.get("chikou"), 4),
-            "signal": row.get("signal"),
-            "lagging_span": row.get("ichimoku_lagging_span"),
-            "conversion_vs_base": row.get("ichimoku_conversion_vs_base"),
-            "cloud_position": row.get("ichimoku_cloud_position"),
-            "future_cloud": row.get("ichimoku_future_cloud"),
-        })
-    else:
-        st.info("1D snapshot bulunamadı.")
 
 if not snapshots.empty:
-    st.subheader("Latest pipeline snapshot")
+    st.subheader("Latest signal snapshot")
     snap_view = snapshots.copy()
 
     if "last_open_time" in snap_view.columns:
-        snap_view["last_open_time_display"] = snap_view["last_open_time"].apply(_fmt_display_time)
+        snap_view["last_open_time"] = snap_view["last_open_time"].apply(_fmt_display_time)
     if "updated_at" in snap_view.columns:
-        snap_view["updated_at_display"] = snap_view["updated_at"].apply(_fmt_display_time)
+        snap_view["updated_at"] = snap_view["updated_at"].apply(_fmt_display_time)
+
+    preferred_cols = [
+        "pair",
+        "timeframe",
+        "last_open_time",
+        "close",
+        "ema4",
+        "ema16",
+        "ema65",
+        "ema120",
+        "rsi14",
+        "rsi52",
+        "signal",
+        "signal_reason",
+        "tenkan",
+        "kijun",
+        "senkou_a",
+        "senkou_b",
+        "chikou",
+        "ichimoku_lagging_span",
+        "ichimoku_conversion_vs_base",
+        "ichimoku_cloud_position",
+        "ichimoku_future_cloud",
+        "updated_at",
+    ]
+
+    visible_cols = [c for c in preferred_cols if c in snap_view.columns]
+    snap_view = snap_view[visible_cols].sort_values("timeframe")
 
     st.dataframe(
-        snap_view.sort_values("timeframe"),
+        snap_view,
         use_container_width=True,
     )
 
