@@ -242,8 +242,8 @@ def current_cloud_position(row: pd.Series) -> str:
 
 
 def future_cloud_color(row: pd.Series) -> str:
-    a = row["senkou_a"]
-    b = row["senkou_b"]
+    a = row.get("senkou_a_base")
+    b = row.get("senkou_b_base")
 
     if pd.isna(a) or pd.isna(b):
         return "unknown"
