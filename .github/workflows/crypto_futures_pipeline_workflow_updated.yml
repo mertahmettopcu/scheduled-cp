@@ -1,0 +1,182 @@
+name: Crypto Futures Pipeline (VPN)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: '12,27,42,57 * * * *'
+      timezone: 'Europe/Istanbul'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  vpn-job:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install OpenVPN
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openvpn
+          openvpn --version
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install requests pandas numpy supabase
+          fi
+
+      - name: Create OVPN file
+        shell: bash
+        env:
+          VPN_OVPN: ${{ secrets.VPN_OVPN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${VPN_OVPN:-}" ]; then
+            echo "::error ::Missing VPN_OVPN secret."
+            exit 1
+          fi
+          printf '%s' "$VPN_OVPN" > vpnbook.ovpn
+          grep -qi '^auth-user-pass' vpnbook.ovpn || echo 'auth-user-pass vpn-auth.txt' >> vpnbook.ovpn
+          grep -qi '^auth-nocache' vpnbook.ovpn || echo 'auth-nocache' >> vpnbook.ovpn
+          grep -qi '^remote-cert-tls' vpnbook.ovpn || echo 'remote-cert-tls server' >> vpnbook.ovpn
+          grep -qi '^pull-filter ignore "block-outside-dns"' vpnbook.ovpn || echo 'pull-filter ignore "block-outside-dns"' >> vpnbook.ovpn
+          grep -qi '^allow-compression no' vpnbook.ovpn || echo 'allow-compression no' >> vpnbook.ovpn
+          chmod 600 vpnbook.ovpn
+
+      - name: Create VPN auth
+        shell: bash
+        env:
+          VPN_USER: ${{ secrets.VPN_USER }}
+          VPN_PASS: ${{ secrets.VPN_PASS }}
+        run: |
+          set -euo pipefail
+          echo "::add-mask::$VPN_USER"
+          echo "::add-mask::$VPN_PASS"
+          printf '%s\n%s\n' "$VPN_USER" "$VPN_PASS" > vpn-auth.txt
+          chmod 600 vpn-auth.txt
+
+      - name: Connect to VPNBook
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo openvpn --config vpnbook.ovpn --auth-user-pass vpn-auth.txt --daemon --writepid /tmp/ovpn.pid --log /tmp/ovpn.log
+          for i in {1..30}; do
+            if sudo grep -q 'AUTH_FAILED' /tmp/ovpn.log; then
+              echo "::error ::VPN login failed."
+              sudo tail -n +1 /tmp/ovpn.log || true
+              exit 1
+            fi
+            if sudo grep -q 'Initialization Sequence Completed' /tmp/ovpn.log; then
+              echo "VPN connected."
+              break
+            fi
+            sleep 2
+          done
+          if ! sudo grep -q 'Initialization Sequence Completed' /tmp/ovpn.log; then
+            echo "::error ::VPN did not connect in time."
+            sudo tail -n 200 /tmp/ovpn.log || true
+            exit 1
+          fi
+
+      - name: Verify public IP
+        run: |
+          echo "Public IP after VPN:"
+          curl --max-time 20 -s https://api.ipify.org || true
+          echo
+
+      - name: Check Binance Futures connectivity
+        run: |
+          python - <<'PY'
+          import requests
+          r = requests.get("https://fapi.binance.com/fapi/v1/ping", timeout=15)
+          print("Status:", r.status_code)
+          print("Body:", r.text[:200])
+          r.raise_for_status()
+          PY
+
+      - name: Run futures pipeline
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_IDS: ${{ secrets.TELEGRAM_CHAT_IDS }}
+          TELEGRAM_ALERT_CHAT_IDS: ${{ secrets.TELEGRAM_ALERT_CHAT_IDS }}
+          GOOGLE_SHEETS_SYMBOLS_CSV_URL: ${{ vars.GOOGLE_SHEETS_SYMBOLS_CSV_URL }}
+          STREAMLIT_APP_URL: ${{ secrets.STREAMLIT_APP_URL }}
+          WAIT_FOR_CANDLE_CLOSE: ${{ github.event_name == 'schedule' && '1' || '0' }}
+          MAX_CLOSE_WAIT_SECONDS: '480'
+          CLOSE_BUFFER_SECONDS: '5'
+          PYTHONUNBUFFERED: '1'
+        run: python -u crypto_futures_pipeline_v2.py
+
+      - name: Notify alert chat on workflow failure
+        if: failure()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_ALERT_CHAT_IDS: ${{ secrets.TELEGRAM_ALERT_CHAT_IDS }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          WORKFLOW_NAME: ${{ github.workflow }}
+          REPOSITORY_NAME: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          python - <<'PY'
+          import os
+          import requests
+
+          token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+          chat_ids = [x.strip() for x in os.getenv("TELEGRAM_ALERT_CHAT_IDS", "").split(",") if x.strip()]
+          if not token or not chat_ids:
+              raise SystemExit("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_ALERT_CHAT_IDS")
+
+          text = (
+              "🚨 GitHub Actions workflow failed\n"
+              f"Workflow: {os.getenv('WORKFLOW_NAME')}\n"
+              f"Repo: {os.getenv('REPOSITORY_NAME')}\n"
+              f"Event: {os.getenv('EVENT_NAME')}\n"
+              f"Ref: {os.getenv('REF_NAME')}\n"
+              f"Run: {os.getenv('RUN_URL')}"
+          )
+
+          url = f"https://api.telegram.org/bot{token}/sendMessage"
+          for chat_id in chat_ids:
+              r = requests.post(url, json={"chat_id": chat_id, "text": text}, timeout=20)
+              print(chat_id, r.status_code, r.text[:300])
+          PY
+
+      - name: Disconnect OpenVPN
+        if: always()
+        run: |
+          if [ -f /tmp/ovpn.pid ]; then
+            sudo kill "$(cat /tmp/ovpn.pid)" || true
+            sleep 2
+          fi
+          sudo pkill -x openvpn || true
+          echo "---- Final OpenVPN log ----"
+          sudo tail -n +1 /tmp/ovpn.log || true
+
+      - name: Clean up
+        if: always()
+        run: |
+          rm -f vpnbook.ovpn vpn-auth.txt || true
+          sudo rm -f /tmp/ovpn.log /tmp/ovpn.pid || true
