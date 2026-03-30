@@ -479,7 +479,7 @@ def _format_candle_time_for_message(iso_ts: str) -> str:
     if ts.tzinfo is None:
         ts = ts.tz_localize("UTC")
     ts = ts.tz_convert(DISPLAY_TZ)
-    return ts.strftime("%Y-%m-%d %H:%M %Z")
+    return ts.strftime("%Y-%m-%d %H:%M")
 
 
 def _build_app_link(pair: str) -> str:
