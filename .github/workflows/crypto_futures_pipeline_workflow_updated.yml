@@ -7,7 +7,7 @@ on:
       - main
   schedule:
     - cron: '12,27,42,57 * * * *'
-      timezone: 'Europe/Istanbul'
+
 
 permissions:
   contents: read
