@@ -6,7 +6,7 @@ on:
     branches:
       - main
   schedule:
-    - cron: '13,27,42,57 * * * *'
+    - cron: '12,27,42,57 * * * *'
 
 jobs:
   vpn-job:
@@ -15,10 +15,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
 
@@ -62,9 +62,37 @@ jobs:
           chmod 600 vpn-auth.txt
 
       - name: Connect to VPN
+        shell: bash
         run: |
-          sudo openvpn --config vpnbook.ovpn --auth-user-pass vpn-auth.txt --daemon --writepid /tmp/ovpn.pid --log /tmp/ovpn.log
-          sleep 10
+          set -euo pipefail
+      
+          sudo openvpn \
+            --config vpnbook.ovpn \
+            --auth-user-pass vpn-auth.txt \
+            --daemon \
+            --writepid /tmp/ovpn.pid \
+            --log /tmp/ovpn.log
+      
+          for i in {1..45}; do
+            if sudo grep -q 'AUTH_FAILED' /tmp/ovpn.log; then
+              echo "::error ::VPN login failed."
+              sudo tail -n +1 /tmp/ovpn.log || true
+              exit 1
+            fi
+      
+            if sudo grep -q 'Initialization Sequence Completed' /tmp/ovpn.log; then
+              echo "VPN connected."
+              break
+            fi
+      
+            sleep 2
+          done
+      
+          if ! sudo grep -q 'Initialization Sequence Completed' /tmp/ovpn.log; then
+            echo "::error ::VPN did not connect in time."
+            sudo tail -n 200 /tmp/ovpn.log || true
+            exit 1
+          fi
 
       - name: Verify public IP
         run: curl https://api.ipify.org
@@ -72,10 +100,16 @@ jobs:
       - name: Fetch Binance data only
         run: python crypto_futures_fetch_binance.py
 
-      - name: Disconnect VPN
+      - name: Disconnect VPN before Supabase/Telegram
+        if: always()
         run: |
-          sudo kill $(cat /tmp/ovpn.pid) || true
-          sudo pkill openvpn || true
+          if [ -f /tmp/ovpn.pid ]; then
+            sudo kill "$(cat /tmp/ovpn.pid)" || true
+            sleep 2
+          fi
+          sudo pkill -x openvpn || true
+          echo "---- Final OpenVPN log ----"
+          sudo tail -n +1 /tmp/ovpn.log || true
 
       - name: Process and upload
         env:
