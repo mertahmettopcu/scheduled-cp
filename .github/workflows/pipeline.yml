@@ -1,4 +1,4 @@
-name: Crypto Futures Pipeline (VPN)
+name: Crypto Futures Pipeline (VPN only for Binance)
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
     branches:
       - main
   schedule:
-    - cron: '*/15 * * * *'
+    - cron: '7,22,37,52 * * * *'
 
 jobs:
   vpn-job:
@@ -22,6 +22,11 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Log trigger time
+        run: |
+          echo "Triggered at UTC: $(date -u '+%Y-%m-%d %H:%M:%S')"
+          echo "Triggered at Turkey time: $(TZ=Europe/Istanbul date '+%Y-%m-%d %H:%M:%S')"
+
       - name: Install OpenVPN
         run: |
           sudo apt-get update
@@ -34,7 +39,7 @@ jobs:
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
           else
-            pip install requests pandas numpy supabase
+            pip install requests pandas numpy supabase python-dotenv httpx
           fi
 
       - name: Create OVPN file
@@ -43,17 +48,8 @@ jobs:
           VPN_OVPN: ${{ secrets.VPN_OVPN }}
         run: |
           set -euo pipefail
-          if [ -z "${VPN_OVPN:-}" ]; then
-            echo "::error ::Missing VPN_OVPN secret."
-            exit 1
-          fi
-
           printf '%s' "$VPN_OVPN" > vpnbook.ovpn
-          grep -qi '^auth-user-pass' vpnbook.ovpn || echo 'auth-user-pass vpn-auth.txt' >> vpnbook.ovpn
-          grep -qi '^auth-nocache' vpnbook.ovpn || echo 'auth-nocache' >> vpnbook.ovpn
-          grep -qi '^remote-cert-tls' vpnbook.ovpn || echo 'remote-cert-tls server' >> vpnbook.ovpn
-          grep -qi '^pull-filter ignore "block-outside-dns"' vpnbook.ovpn || echo 'pull-filter ignore "block-outside-dns"' >> vpnbook.ovpn
-          grep -qi '^allow-compression no' vpnbook.ovpn || echo 'allow-compression no' >> vpnbook.ovpn
+          echo 'auth-user-pass vpn-auth.txt' >> vpnbook.ovpn
           chmod 600 vpnbook.ovpn
 
       - name: Create VPN auth
@@ -62,137 +58,30 @@ jobs:
           VPN_USER: ${{ secrets.VPN_USER }}
           VPN_PASS: ${{ secrets.VPN_PASS }}
         run: |
-          set -euo pipefail
-          if [ -z "${VPN_USER:-}" ] || [ -z "${VPN_PASS:-}" ]; then
-            echo "::error ::Missing VPN_USER or VPN_PASS secret."
-            exit 1
-          fi
-
-          echo "::add-mask::$VPN_USER"
-          echo "::add-mask::$VPN_PASS"
           printf '%s\n%s\n' "$VPN_USER" "$VPN_PASS" > vpn-auth.txt
           chmod 600 vpn-auth.txt
 
-      - name: Connect to VPNBook
-        shell: bash
+      - name: Connect to VPN
         run: |
-          set -euo pipefail
-
-          sudo openvpn \
-            --config vpnbook.ovpn \
-            --auth-user-pass vpn-auth.txt \
-            --daemon \
-            --writepid /tmp/ovpn.pid \
-            --log /tmp/ovpn.log
-
-          for i in {1..45}; do
-            if sudo grep -q 'AUTH_FAILED' /tmp/ovpn.log; then
-              echo "::error ::VPN login failed."
-              sudo tail -n +1 /tmp/ovpn.log || true
-              exit 1
-            fi
-
-            if sudo grep -q 'Initialization Sequence Completed' /tmp/ovpn.log; then
-              echo "VPN connected."
-              break
-            fi
-
-            sleep 2
-          done
-
-          if ! sudo grep -q 'Initialization Sequence Completed' /tmp/ovpn.log; then
-            echo "::error ::VPN did not connect in time."
-            sudo tail -n 200 /tmp/ovpn.log || true
-            exit 1
-          fi
-
-      - name: Wait for VPN routes to stabilize
-        run: sleep 8
+          sudo openvpn --config vpnbook.ovpn --auth-user-pass vpn-auth.txt --daemon --writepid /tmp/ovpn.pid --log /tmp/ovpn.log
+          sleep 10
 
       - name: Verify public IP
-        shell: bash
+        run: curl https://api.ipify.org
+
+      - name: Fetch Binance data only
+        run: python crypto_futures_fetch_binance.py
+
+      - name: Disconnect VPN
         run: |
-          set -euo pipefail
+          sudo kill $(cat /tmp/ovpn.pid) || true
+          sudo pkill openvpn || true
 
-          echo "Public IP after VPN:"
-          ip_output="$(curl --fail --silent --show-error --max-time 30 https://api.ipify.org)"
-          if [ -z "$ip_output" ]; then
-            echo "::error ::Public IP check returned empty output."
-            exit 1
-          fi
-
-          echo "$ip_output"
-
-      - name: Check Binance Futures connectivity
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          python - <<'PY'
-          import time
-          import requests
-
-          urls = [
-              "https://fapi.binance.com/fapi/v1/ping",
-              "https://fapi.binance.com/fapi/v1/time",
-          ]
-
-          session = requests.Session()
-          timeout = 30
-          max_rounds = 5
-          last_err = None
-
-          for round_no in range(1, max_rounds + 1):
-              print(f"Connectivity round {round_no}/{max_rounds}", flush=True)
-
-              all_ok = True
-              for url in urls:
-                  try:
-                      print(f"Requesting: {url}", flush=True)
-                      r = session.get(url, timeout=timeout)
-                      print(f"Status: {r.status_code}", flush=True)
-                      print(f"Body: {r.text[:200]}", flush=True)
-                      r.raise_for_status()
-                  except Exception as e:
-                      all_ok = False
-                      last_err = e
-                      print(f"Attempt failed for {url}: {type(e).__name__}: {e}", flush=True)
-
-              if all_ok:
-                  print("Binance Futures connectivity check passed.", flush=True)
-                  raise SystemExit(0)
-
-              if round_no < max_rounds:
-                  wait_seconds = 10 * round_no
-                  print(f"Retrying after {wait_seconds}s...", flush=True)
-                  time.sleep(wait_seconds)
-
-          raise SystemExit(f"Binance Futures connectivity check failed after retries: {last_err}")
-          PY
-
-      - name: Run futures pipeline
+      - name: Process and upload
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_IDS: ${{ secrets.TELEGRAM_CHAT_IDS }}
           STREAMLIT_APP_URL: ${{ secrets.STREAMLIT_APP_URL }}
-          PYTHONUNBUFFERED: '1'
-        run: python -u crypto_futures_pipeline_v2.py
-
-      - name: Disconnect OpenVPN
-        if: always()
-        run: |
-          if [ -f /tmp/ovpn.pid ]; then
-            sudo kill "$(cat /tmp/ovpn.pid)" || true
-            sleep 2
-          fi
-          sudo pkill -x openvpn || true
-          echo "---- Final OpenVPN log ----"
-          sudo tail -n +1 /tmp/ovpn.log || true
-
-      - name: Clean up
-        if: always()
-        run: |
-          rm -f vpnbook.ovpn vpn-auth.txt || true
-          sudo rm -f /tmp/ovpn.log /tmp/ovpn.pid || true
+        run: python crypto_futures_process_upload.py
