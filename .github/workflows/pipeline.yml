@@ -5,8 +5,6 @@ on:
   push:
     branches:
       - main
-  schedule:
-    - cron: '12,27,42,57 * * * *'
 
 jobs:
   vpn-job:
@@ -119,12 +117,25 @@ jobs:
         run: |
           set -euo pipefail
           echo "Public IP after VPN:"
-          ip_output="$(curl --fail --silent --show-error --max-time 30 https://api.ipify.org)"
-          if [ -z "$ip_output" ]; then
-            echo "::error ::Public IP check returned empty output."
+      
+          success=0
+          for i in 1 2 3 4 5; do
+            if ip_output="$(curl --fail --silent --show-error --max-time 30 https://api.ipify.org)"; then
+              if [ -n "$ip_output" ]; then
+                echo "$ip_output"
+                success=1
+                break
+              fi
+            fi
+      
+            echo "IP check attempt $i failed, retrying..."
+            sleep $((i * 2))
+          done
+      
+          if [ "$success" -ne 1 ]; then
+            echo "::error ::Public IP check failed after retries."
             exit 1
           fi
-          echo "$ip_output"
 
       - name: Fetch Binance data only
         run: python crypto_futures_fetch_binance.py
