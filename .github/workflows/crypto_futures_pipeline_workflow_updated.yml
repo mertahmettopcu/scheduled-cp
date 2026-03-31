@@ -2,13 +2,11 @@ name: Crypto Futures Pipeline (VPN)
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
   schedule:
-    - cron: '12,27,42,57 * * * *'
-
-
-permissions:
-  contents: read
-
+    - cron: '*/15 * * * *'
 
 jobs:
   vpn-job:
@@ -102,7 +100,7 @@ jobs:
         run: |
           python - <<'PY'
           import requests
-          r = requests.get("https://fapi.binance.com/fapi/v1/ping", timeout=15)
+          r = requests.get("https://fapi.binance.com/fapi/v1/ping", timeout=10)
           print("Status:", r.status_code)
           print("Body:", r.text[:200])
           r.raise_for_status()
@@ -114,49 +112,9 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_IDS: ${{ secrets.TELEGRAM_CHAT_IDS }}
-          TELEGRAM_ALERT_CHAT_IDS: ${{ secrets.TELEGRAM_ALERT_CHAT_IDS }}
-          GOOGLE_SHEETS_SYMBOLS_CSV_URL: ${{ vars.GOOGLE_SHEETS_SYMBOLS_CSV_URL }}
           STREAMLIT_APP_URL: ${{ secrets.STREAMLIT_APP_URL }}
-          WAIT_FOR_CANDLE_CLOSE: ${{ github.event_name == 'schedule' && '1' || '0' }}
-          MAX_CLOSE_WAIT_SECONDS: '480'
-          CLOSE_BUFFER_SECONDS: '5'
           PYTHONUNBUFFERED: '1'
         run: python -u crypto_futures_pipeline_v2.py
-
-      - name: Notify alert chat on workflow failure
-        if: failure()
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_ALERT_CHAT_IDS: ${{ secrets.TELEGRAM_ALERT_CHAT_IDS }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          WORKFLOW_NAME: ${{ github.workflow }}
-          REPOSITORY_NAME: ${{ github.repository }}
-          EVENT_NAME: ${{ github.event_name }}
-          REF_NAME: ${{ github.ref_name }}
-        run: |
-          python - <<'PY'
-          import os
-          import requests
-
-          token = os.getenv("TELEGRAM_BOT_TOKEN", "")
-          chat_ids = [x.strip() for x in os.getenv("TELEGRAM_ALERT_CHAT_IDS", "").split(",") if x.strip()]
-          if not token or not chat_ids:
-              raise SystemExit("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_ALERT_CHAT_IDS")
-
-          text = (
-              "🚨 GitHub Actions workflow failed\n"
-              f"Workflow: {os.getenv('WORKFLOW_NAME')}\n"
-              f"Repo: {os.getenv('REPOSITORY_NAME')}\n"
-              f"Event: {os.getenv('EVENT_NAME')}\n"
-              f"Ref: {os.getenv('REF_NAME')}\n"
-              f"Run: {os.getenv('RUN_URL')}"
-          )
-
-          url = f"https://api.telegram.org/bot{token}/sendMessage"
-          for chat_id in chat_ids:
-              r = requests.post(url, json={"chat_id": chat_id, "text": text}, timeout=20)
-              print(chat_id, r.status_code, r.text[:300])
-          PY
 
       - name: Disconnect OpenVPN
         if: always()
