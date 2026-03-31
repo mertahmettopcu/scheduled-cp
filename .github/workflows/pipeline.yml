@@ -6,7 +6,7 @@ on:
     branches:
       - main
   schedule:
-    - cron: '7,22,37,52 * * * *'
+    - cron: '13,27,42,57 * * * *'
 
 jobs:
   vpn-job:
