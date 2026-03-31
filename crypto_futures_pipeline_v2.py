@@ -26,6 +26,7 @@ import time
 from datetime import datetime, timezone
 from typing import Dict, Iterable, List
 
+import httpx
 import numpy as np
 import pandas as pd
 import requests
@@ -54,6 +55,10 @@ TIMEFRAME_LIMITS = {
     "1d": 400,
 }
 UPSERT_CHUNK_SIZE = 500
+
+SUPABASE_MAX_RETRIES = 4
+SUPABASE_RETRY_BASE_DELAY = 1.0
+SUPABASE_RETRY_MAX_DELAY = 8.0
 
 
 def log(msg: str) -> None:
@@ -370,6 +375,7 @@ def build_telegram_message(
     ])
     return "\n".join(lines)
 
+
 def signal_changed(prev_value: str | None, new_value: str) -> bool:
     prev_norm = (prev_value or "").strip().upper()
     new_norm = (new_value or "").strip().upper()
@@ -450,21 +456,85 @@ def candles_to_records(df: pd.DataFrame) -> List[Dict]:
     return recs
 
 
+def _is_retryable_supabase_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+
+    if isinstance(exc, (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout, httpx.RemoteProtocolError)):
+        return True
+
+    retryable_fragments = (
+        "connection reset by peer",
+        "connection reset",
+        "read timed out",
+        "write timed out",
+        "timed out",
+        "timeout",
+        "temporarily unavailable",
+        "server disconnected",
+        "connection aborted",
+        "connection refused",
+        "remote protocol error",
+    )
+    return any(fragment in msg for fragment in retryable_fragments)
+
+
+def _run_with_supabase_retry(action_name: str, func):
+    attempt = 0
+    delay = SUPABASE_RETRY_BASE_DELAY
+
+    while True:
+        attempt += 1
+        try:
+            return func()
+        except Exception as exc:
+            retryable = _is_retryable_supabase_error(exc)
+            is_last_attempt = attempt >= SUPABASE_MAX_RETRIES
+
+            if (not retryable) or is_last_attempt:
+                raise
+
+            log(
+                f"[Retry] {action_name} failed on attempt {attempt}/{SUPABASE_MAX_RETRIES}: "
+                f"{type(exc).__name__}: {exc}. Retrying in {delay:.1f}s..."
+            )
+            time.sleep(delay)
+            delay = min(delay * 2, SUPABASE_RETRY_MAX_DELAY)
+
+
 def upsert_in_chunks(table_name: str, rows: Iterable[Dict], on_conflict: str) -> None:
     rows = list(rows)
     if not rows:
         return
+
     for i in range(0, len(rows), UPSERT_CHUNK_SIZE):
         chunk = rows[i:i + UPSERT_CHUNK_SIZE]
-        supabase.table(table_name).upsert(chunk, on_conflict=on_conflict, returning="minimal").execute()
+
+        def _do_upsert():
+            return (
+                supabase
+                .table(table_name)
+                .upsert(chunk, on_conflict=on_conflict, returning="minimal")
+                .execute()
+            )
+
+        _run_with_supabase_retry(
+            action_name=f"upsert {table_name} chunk {i // UPSERT_CHUNK_SIZE + 1}",
+            func=_do_upsert,
+        )
 
 
 def get_previous_snapshot_map(pair: str) -> Dict[str, Dict]:
-    resp = (
-        supabase.table("futures_signal_snapshots")
-        .select("*")
-        .eq("pair", pair)
-        .execute()
+    def _do_fetch():
+        return (
+            supabase.table("futures_signal_snapshots")
+            .select("*")
+            .eq("pair", pair)
+            .execute()
+        )
+
+    resp = _run_with_supabase_retry(
+        action_name=f"fetch previous snapshots for {pair}",
+        func=_do_fetch,
     )
     rows = resp.data or []
     return {row["timeframe"]: row for row in rows}
@@ -481,6 +551,7 @@ def _safe_float(v):
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
 
 def _format_candle_time_for_message(iso_ts: str) -> str:
     ts = pd.Timestamp(iso_ts)
