@@ -88,6 +88,7 @@ jobs:
           sudo openvpn \
             --config vpnbook.ovpn \
             --auth-user-pass vpn-auth.txt \
+            --auth-nocache \
             --daemon \
             --writepid /tmp/ovpn.pid \
             --log /tmp/ovpn.log
