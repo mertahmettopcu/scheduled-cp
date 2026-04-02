@@ -157,6 +157,8 @@ jobs:
           fi
 
       - name: Fetch Binance data only
+        env:
+          GOOGLE_SHEETS_SYMBOLS_CSV_URL: ${{ vars.GOOGLE_SHEETS_SYMBOLS_CSV_URL }}
         run: python crypto_futures_fetch_binance.py
 
       - name: Disconnect VPN before Supabase/Telegram
