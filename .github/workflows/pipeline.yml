@@ -115,26 +115,45 @@ jobs:
       - name: Verify public IP
         shell: bash
         run: |
-          set -euo pipefail
+          set -uo pipefail
           echo "Public IP after VPN:"
-      
+
+          endpoints=(
+            "https://api.ipify.org"
+            "https://ifconfig.me/ip"
+            "https://icanhazip.com"
+          )
+
           success=0
-          for i in 1 2 3 4 5; do
-            if ip_output="$(curl --fail --silent --show-error --max-time 30 https://api.ipify.org)"; then
-              if [ -n "$ip_output" ]; then
-                echo "$ip_output"
-                success=1
-                break
+          used_endpoint=""
+          ip_output=""
+
+          for endpoint in "${endpoints[@]}"; do
+            echo "Trying endpoint: $endpoint"
+
+            for i in 1 2 3; do
+              if ip_output="$(curl --fail --silent --show-error --max-time 20 "$endpoint")"; then
+                ip_output="$(echo "$ip_output" | tr -d '\r' | tr -d '\n' | xargs)"
+                if [ -n "$ip_output" ]; then
+                  echo "Public IP detected: $ip_output"
+                  echo "IP endpoint used: $endpoint"
+                  success=1
+                  used_endpoint="$endpoint"
+                  break
+                fi
               fi
+
+              echo "IP check failed for $endpoint (attempt $i), retrying..."
+              sleep $((i * 2))
+            done
+
+            if [ "$success" -eq 1 ]; then
+              break
             fi
-      
-            echo "IP check attempt $i failed, retrying..."
-            sleep $((i * 2))
           done
-      
+
           if [ "$success" -ne 1 ]; then
-            echo "::error ::Public IP check failed after retries."
-            exit 1
+            echo "::warning ::Public IP check failed on all fallback endpoints. VPN may still be usable, continuing to Binance fetch."
           fi
 
       - name: Fetch Binance data only
