@@ -9,7 +9,6 @@ from typing import Dict, List
 import pandas as pd
 
 from crypto_futures_common import (
-    PAIR_LIST,
     add_ema_rsi_features,
     add_ichimoku,
     build_telegram_message,
@@ -43,11 +42,18 @@ def run() -> None:
     supabase = create_supabase_client_from_env()
     raw_payload = load_cached_raw_data()
 
+    # ✅ CRITICAL FIX: sadece fetch edilen coinleri kullan
+    pairs_to_process = list(raw_payload.get("pairs", {}).keys())
+
+    if not pairs_to_process:
+        raise SystemExit("No pairs found in raw payload. Fetch stage likely failed.")
+
     candle_rows: List[Dict] = []
     snapshot_rows: List[Dict] = []
 
-    for pair in PAIR_LIST:
+    for pair in pairs_to_process:
         log(f"• Processing {pair}")
+
         pair_raw = raw_payload.get("pairs", {}).get(pair, {})
         pair_dfs: Dict[str, pd.DataFrame] = {}
 
