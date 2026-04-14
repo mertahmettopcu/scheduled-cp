@@ -86,12 +86,7 @@ def run() -> None:
         changed_1h = signal_changed(prev_1h.get("signal") if prev_1h else None, snap_1h["signal"])
         changed_1d = signal_changed(prev_1d.get("signal") if prev_1d else None, snap_1d["signal"])
 
-        log(
-            f"  └─ Signal compare {pair} | "
-            f"15m: prev={prev_15m.get('signal') if prev_15m else None} new={snap_15m['signal']} changed={changed_15m} | "
-            f"1h: prev={prev_1h.get('signal') if prev_1h else None} new={snap_1h['signal']} changed={changed_1h} | "
-            f"1d: prev={prev_1d.get('signal') if prev_1d else None} new={snap_1d['signal']} changed={changed_1d}"
-        )
+        log(f"  └─ Signal state checked for {pair}")
 
         should_send = (prev_15m is not None or prev_1h is not None or prev_1d is not None) and (
             changed_15m or changed_1h or changed_1d

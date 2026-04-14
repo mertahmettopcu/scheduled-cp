@@ -1,4 +1,4 @@
-name: Crypto Futures Pipeline (VPN only for Binance)
+name: Scheduled TS
 
 on:
   workflow_dispatch:
@@ -94,7 +94,6 @@ jobs:
           for i in {1..45}; do
             if sudo grep -q 'AUTH_FAILED' /tmp/ovpn.log; then
               echo "::error ::VPN login failed."
-              sudo tail -n +1 /tmp/ovpn.log || true
               exit 1
             fi
       
@@ -108,7 +107,6 @@ jobs:
       
           if ! sudo grep -q 'Initialization Sequence Completed' /tmp/ovpn.log; then
             echo "::error ::VPN did not connect in time."
-            sudo tail -n 200 /tmp/ovpn.log || true
             exit 1
           fi
 
@@ -116,7 +114,7 @@ jobs:
         shell: bash
         run: |
           set -uo pipefail
-          echo "Public IP after VPN:"
+          echo "Checking outbound IP after VPN...:"
 
           endpoints=(
             "https://api.ipify.org"
@@ -135,8 +133,7 @@ jobs:
               if ip_output="$(curl --fail --silent --show-error --max-time 20 "$endpoint")"; then
                 ip_output="$(echo "$ip_output" | tr -d '\r' | tr -d '\n' | xargs)"
                 if [ -n "$ip_output" ]; then
-                  echo "Public IP detected: $ip_output"
-                  echo "IP endpoint used: $endpoint"
+                  echo "Public IP check succeeded."
                   success=1
                   used_endpoint="$endpoint"
                   break
@@ -159,7 +156,7 @@ jobs:
       - name: Fetch Binance data only
         env:
           GOOGLE_SHEETS_SYMBOLS_CSV_URL: ${{ vars.GOOGLE_SHEETS_SYMBOLS_CSV_URL }}
-        run: python crypto_futures_fetch_binance.py
+        run: python fetch_source_data.py
 
       - name: Disconnect VPN before Supabase/Telegram
         if: always()
@@ -169,8 +166,7 @@ jobs:
             sleep 2
           fi
           sudo pkill -x openvpn || true
-          echo "---- Final OpenVPN log ----"
-          sudo tail -n +1 /tmp/ovpn.log || true
+          echo "OpenVPN process stopped."
 
       - name: Process and upload
         env:
@@ -179,4 +175,4 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_IDS: ${{ secrets.TELEGRAM_CHAT_IDS }}
           STREAMLIT_APP_URL: ${{ secrets.STREAMLIT_APP_URL }}
-        run: python crypto_futures_process_upload.py
+        run: python process_and_publish.py

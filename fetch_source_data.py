@@ -10,7 +10,7 @@ from pathlib import Path
 import pandas as pd
 import requests
 
-from crypto_futures_common import PAIR_LIST, TIMEFRAME_LIMITS, fetch_continuous_klines, log
+from core_utils import PAIR_LIST, TIMEFRAME_LIMITS, fetch_continuous_klines, log
 
 OUTPUT_FILE = Path("binance_data.json")
 GOOGLE_SHEETS_SYMBOLS_CSV_URL = os.getenv("GOOGLE_SHEETS_SYMBOLS_CSV_URL")
@@ -71,7 +71,6 @@ def _load_pairs_from_google_sheets_csv(url: str, retries: int = 3) -> list[str]:
                 raise ValueError("Google Sheets CSV loaded successfully but no enabled symbols were found.")
 
             log(f"Loaded {len(deduped_symbols)} enabled symbols from Google Sheets CSV")
-            log(f"Symbols from sheet: {', '.join(deduped_symbols)}")
             return deduped_symbols
 
         except Exception as exc:
@@ -112,7 +111,6 @@ def run() -> None:
     }
 
     log(f"Active pair count: {len(active_pairs)}")
-    log(f"Pairs to fetch: {', '.join(active_pairs)}")
 
     for pair in active_pairs:
         log(f"• Fetching {pair}")

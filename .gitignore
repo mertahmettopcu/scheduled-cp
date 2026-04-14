@@ -1,0 +1,6 @@
+binance_data.json
+vpnbook.ovpn
+vpn-auth.txt
+.env
+*.log
+__pycache__/

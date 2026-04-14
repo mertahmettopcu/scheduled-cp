@@ -447,7 +447,7 @@ def _run_with_supabase_retry(action_name: str, func):
 
             log(
                 f"[Retry] {action_name} failed on attempt {attempt}/{SUPABASE_MAX_RETRIES}: "
-                f"{type(exc).__name__}: {exc}. Retrying in {delay:.1f}s..."
+                f"{type(exc).__name__}. Retrying in {delay:.1f}s..."
             )
             time.sleep(delay)
             delay = min(delay * 2, SUPABASE_RETRY_MAX_DELAY)
@@ -479,7 +479,7 @@ def get_previous_snapshot_map(supabase: Client, pair: str) -> Dict[str, Dict]:
     def _do_fetch():
         return (
             supabase.table("futures_signal_snapshots")
-            .select("*")
+            .select("pair,timeframe,signal")
             .eq("pair", pair)
             .execute()
         )
@@ -504,23 +504,28 @@ def send_telegram_message(text: str, bot_token: str, chat_ids: List[str]) -> Non
 
         last_exc = None
         delay = 1.0
+        masked_chat = f"...{str(chat_id)[-4:]}" if chat_id else "unknown"
+
         for attempt in range(1, 5):
             try:
                 r = requests.post(url, json=payload, timeout=20)
                 r.raise_for_status()
-                log(f"Telegram sent to chat_id={chat_id}")
+                log(f"Telegram sent to {masked_chat}")
                 last_exc = None
                 break
             except requests.RequestException as exc:
                 last_exc = exc
                 if attempt == 4:
                     break
-                log(f"[Retry] telegram send failed for {chat_id} on attempt {attempt}/4: {exc}. Retrying in {delay:.1f}s...")
+                log(
+                    f"[Retry] telegram send failed for {masked_chat} "
+                    f"on attempt {attempt}/4. Retrying in {delay:.1f}s..."
+                )
                 time.sleep(delay)
                 delay = min(delay * 2, 8.0)
 
         if last_exc is not None:
-            raise last_exc
+            raise RuntimeError(f"Telegram send failed after 4 attempts for {masked_chat}")
 
 
 def _safe_float(v):
