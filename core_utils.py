@@ -494,7 +494,7 @@ def get_previous_snapshot_map(supabase: Client, pair: str) -> Dict[str, Dict]:
 
 def send_telegram_message(text: str, bot_token: str, chat_ids: List[str]) -> None:
     if not bot_token or not chat_ids:
-        log("Telegram credentials missing, skipping Telegram send.")
+        log("Notification credentials missing, skipping Telegram send.")
         return
 
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
@@ -510,7 +510,7 @@ def send_telegram_message(text: str, bot_token: str, chat_ids: List[str]) -> Non
             try:
                 r = requests.post(url, json=payload, timeout=20)
                 r.raise_for_status()
-                log(f"Telegram sent to {masked_chat}")
+                log(f"Notification sent to {masked_chat}")
                 last_exc = None
                 break
             except requests.RequestException as exc:
@@ -518,14 +518,14 @@ def send_telegram_message(text: str, bot_token: str, chat_ids: List[str]) -> Non
                 if attempt == 4:
                     break
                 log(
-                    f"[Retry] telegram send failed for {masked_chat} "
+                    f"[Retry] notification send failed for {masked_chat} "
                     f"on attempt {attempt}/4. Retrying in {delay:.1f}s..."
                 )
                 time.sleep(delay)
                 delay = min(delay * 2, 8.0)
 
         if last_exc is not None:
-            raise RuntimeError(f"Telegram send failed after 4 attempts for {masked_chat}")
+            raise RuntimeError(f"Notification send failed after 4 attempts for {masked_chat}")
 
 
 def _safe_float(v):
