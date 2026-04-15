@@ -14,7 +14,7 @@ from core_utils import PAIR_LIST, TIMEFRAME_LIMITS, fetch_continuous_klines, log
 
 OUTPUT_FILE = Path("binance_data.json")
 GOOGLE_SHEETS_SYMBOLS_CSV_URL = os.getenv("GOOGLE_SHEETS_SYMBOLS_CSV_URL")
-
+PAIR_LIST_FILE = Path("active_pairs.json")
 
 def _normalize_enabled(value: object) -> bool:
     if isinstance(value, bool):
@@ -89,13 +89,28 @@ def _load_pairs_from_google_sheets_csv(url: str, retries: int = 2) -> list[str]:
 
 
 def _get_active_pairs() -> list[str]:
+    if PAIR_LIST_FILE.exists():
+        try:
+            data = json.loads(PAIR_LIST_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                pairs = [str(x).strip().upper() for x in data if str(x).strip()]
+                if pairs:
+                    log(f"Loaded {len(pairs)} active symbols from local pair list file")
+                    return pairs
+        except Exception as exc:
+            log(f"Local pair list file could not be used: {exc}")
+
     if not GOOGLE_SHEETS_SYMBOLS_CSV_URL:
         log("Remote symbol list URL is not set. Using built-in list.")
         return list(PAIR_LIST)
 
     return _load_pairs_from_google_sheets_csv(GOOGLE_SHEETS_SYMBOLS_CSV_URL)
 
-
+def write_active_pairs_file() -> None:
+    active_pairs = _get_active_pairs()
+    PAIR_LIST_FILE.write_text(json.dumps(active_pairs), encoding="utf-8")
+    log(f"Saved {len(active_pairs)} active symbols to {PAIR_LIST_FILE.resolve()}")
+    
 def run() -> None:
     active_pairs = _get_active_pairs()
 
@@ -125,4 +140,9 @@ def run() -> None:
 
 
 if __name__ == "__main__":
-    run()
+    mode = os.getenv("FETCH_SOURCE_MODE", "run").strip().lower()
+
+    if mode == "prepare_pairs":
+        write_active_pairs_file()
+    else:
+        run()
