@@ -8,7 +8,7 @@ from typing import Dict, List
 
 import pandas as pd
 
-from crypto_futures_common import (
+from core_utils import (
     add_ema_rsi_features,
     add_ichimoku,
     build_telegram_message,
