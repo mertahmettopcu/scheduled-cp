@@ -31,7 +31,7 @@ def _load_pairs_from_google_sheets_csv(url: str, retries: int = 2) -> list[str]:
 
     for attempt in range(1, retries + 1):
         try:
-            log(f"Trying Google Sheets symbol CSV (attempt {attempt}/{retries})")
+            log(f"Trying remote symbol list (attempt {attempt}/{retries})")
 
             response = requests.get(url, timeout=20)
             response.raise_for_status()
@@ -70,27 +70,27 @@ def _load_pairs_from_google_sheets_csv(url: str, retries: int = 2) -> list[str]:
             if not deduped_symbols:
                 raise ValueError("Google Sheets CSV loaded successfully but no enabled symbols were found.")
 
-            log(f"Loaded {len(deduped_symbols)} enabled symbols from Google Sheets CSV")
+            log(f"Loaded {len(deduped_symbols)} enabled symbols from remote list")
             return deduped_symbols
 
         except Exception as exc:
             last_error = exc
-            log(f"Google Sheets CSV read failed on attempt {attempt}/{retries}: {exc}")
+            log(f"Remote symbol list read failed on attempt {attempt}/{retries}: {exc}")
             if attempt < retries:
                 sleep_seconds = attempt * 2
-                log(f"Retrying Google Sheets CSV in {sleep_seconds} seconds...")
+                log(f"Retrying remote symbol list in {sleep_seconds} seconds...")
                 time.sleep(sleep_seconds)
 
-    log(f"WARNING: Google Sheets CSV could not be used after {retries} attempts. Falling back to built-in PAIR_LIST.")
+    log(f"WARNING: Remote symbol list could not be used after {retries} attempts. Falling back to built-in list.")
     if last_error is not None:
-        log(f"Last Google Sheets CSV error: {last_error}")
+        log(f"Last remote list error: {last_error}")
 
     return list(PAIR_LIST)
 
 
 def _get_active_pairs() -> list[str]:
     if not GOOGLE_SHEETS_SYMBOLS_CSV_URL:
-        log("GOOGLE_SHEETS_SYMBOLS_CSV_URL is not set. Using built-in PAIR_LIST.")
+        log("Remote symbol list URL is not set. Using built-in list.")
         return list(PAIR_LIST)
 
     return _load_pairs_from_google_sheets_csv(GOOGLE_SHEETS_SYMBOLS_CSV_URL)
@@ -102,7 +102,7 @@ def run() -> None:
     payload = {
         "pairs": {},
         "meta": {
-            "source": "Binance continuousKlines",
+            "source": "source_continuous_klines",
             "contractType": "PERPETUAL",
             "timeframes": list(TIMEFRAME_LIMITS.keys()),
             "pair_source": "google_sheets_csv" if GOOGLE_SHEETS_SYMBOLS_CSV_URL else "built_in_pair_list",
@@ -113,7 +113,7 @@ def run() -> None:
     log(f"Active pair count: {len(active_pairs)}")
 
     for pair in active_pairs:
-        log(f"• Fetching {pair}")
+        log(f"• Loading dataset for {pair}")
         payload["pairs"][pair] = {}
         for timeframe, limit in TIMEFRAME_LIMITS.items():
             raw = fetch_continuous_klines(pair, timeframe, limit)
@@ -121,7 +121,7 @@ def run() -> None:
             log(f"  └─ {timeframe}: fetched {len(raw)} raw candles")
 
     OUTPUT_FILE.write_text(json.dumps(payload), encoding="utf-8")
-    log(f"✅ Binance raw data saved to {OUTPUT_FILE.resolve()}")
+    log(f"✅ Source raw data saved to {OUTPUT_FILE.resolve()}")
 
 
 if __name__ == "__main__":
