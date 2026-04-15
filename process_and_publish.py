@@ -42,7 +42,6 @@ def run() -> None:
     supabase = create_supabase_client_from_env()
     raw_payload = load_cached_raw_data()
 
-    # ✅ CRITICAL FIX: sadece fetch edilen coinleri kullan
     pairs_to_process = list(raw_payload.get("pairs", {}).keys())
 
     if not pairs_to_process:
@@ -121,9 +120,9 @@ def run() -> None:
                 triggered_1d=changed_1d,
             )
             send_telegram_message(message, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_IDS)
-            log(f"  └─ 📨 Telegram sent for {pair}")
+            log(f"  └─ 📨 Notification sent for {pair}")
         else:
-            log(f"  └─ Telegram skipped for {pair} (no new signal)")
+            log(f"  └─ Notification skipped for {pair} (no new signal)")
 
     if not candle_rows:
         raise SystemExit("No candle rows prepared; nothing to upsert.")
@@ -137,7 +136,7 @@ def run() -> None:
     log(f"⬆️ Upserting {len(dedup_snapshots)} snapshot rows into futures_signal_snapshots")
     upsert_in_chunks(supabase, "futures_signal_snapshots", dedup_snapshots.values(), on_conflict="pair,timeframe")
 
-    log("✅ Process/upload stage complete")
+    log("✅ Process/publish stage complete")
 
 
 if __name__ == "__main__":
