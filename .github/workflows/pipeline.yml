@@ -7,7 +7,7 @@ on:
       - main
 
 jobs:
-  vpn-job:
+  scheduled-job:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -25,7 +25,7 @@ jobs:
           echo "Triggered at UTC: $(date -u '+%Y-%m-%d %H:%M:%S')"
           echo "Triggered at Turkey time: $(TZ=Europe/Istanbul date '+%Y-%m-%d %H:%M:%S')"
 
-      - name: Install OpenVPN
+      - name: Install tunnel client
         run: |
           sudo apt-get update
           sudo apt-get install -y openvpn
@@ -40,7 +40,7 @@ jobs:
             pip install requests pandas numpy supabase python-dotenv httpx
           fi
 
-      - name: Create OVPN file
+      - name: Write tunnel config
         shell: bash
         env:
           VPN_OVPN: ${{ secrets.VPN_OVPN }}
@@ -62,7 +62,7 @@ jobs:
 
           chmod 600 vpnbook.ovpn
 
-      - name: Create VPN auth
+      - name: Write tunnel credentials
         shell: bash
         env:
           VPN_USER: ${{ secrets.VPN_USER }}
@@ -78,11 +78,11 @@ jobs:
           printf '%s\n%s\n' "$VPN_USER" "$VPN_PASS" > vpn-auth.txt
           chmod 600 vpn-auth.txt
 
-      - name: Connect to VPN
+      - name: Start network tunnel
         shell: bash
         run: |
           set -euo pipefail
-      
+
           sudo openvpn \
             --config vpnbook.ovpn \
             --auth-user-pass vpn-auth.txt \
@@ -90,31 +90,31 @@ jobs:
             --daemon \
             --writepid /tmp/ovpn.pid \
             --log /tmp/ovpn.log
-      
+
           for i in {1..45}; do
             if sudo grep -q 'AUTH_FAILED' /tmp/ovpn.log; then
-              echo "::error ::VPN login failed."
+              echo "::error ::Tunnel login failed."
               exit 1
             fi
-      
+
             if sudo grep -q 'Initialization Sequence Completed' /tmp/ovpn.log; then
-              echo "VPN connected."
+              echo "Tunnel connected."
               break
             fi
-      
+
             sleep 2
           done
-      
+
           if ! sudo grep -q 'Initialization Sequence Completed' /tmp/ovpn.log; then
-            echo "::error ::VPN did not connect in time."
+            echo "::error ::Tunnel did not connect in time."
             exit 1
           fi
 
-      - name: Verify public IP
+      - name: Check outbound connectivity
         shell: bash
         run: |
           set -uo pipefail
-          echo "Checking outbound IP after VPN...:"
+          echo "Checking outbound connectivity...:"
 
           endpoints=(
             "https://api.ipify.org"
@@ -150,15 +150,15 @@ jobs:
           done
 
           if [ "$success" -ne 1 ]; then
-            echo "::warning ::Public IP check failed on all fallback endpoints. VPN may still be usable, continuing to Binance fetch."
+            echo "::warning ::Connectivity check failed on all fallback endpoints. Continuing to source fetch."
           fi
 
-      - name: Fetch Binance data only
+      - name: Fetch source data
         env:
           GOOGLE_SHEETS_SYMBOLS_CSV_URL: ${{ vars.GOOGLE_SHEETS_SYMBOLS_CSV_URL }}
         run: python fetch_source_data.py
 
-      - name: Disconnect VPN before Supabase/Telegram
+      - name: Stop network tunnel before publish stage
         if: always()
         run: |
           if [ -f /tmp/ovpn.pid ]; then
@@ -166,9 +166,9 @@ jobs:
             sleep 2
           fi
           sudo pkill -x openvpn || true
-          echo "OpenVPN process stopped."
+          echo "Tunnel process stopped."
 
-      - name: Process and upload
+      - name: Process and publish data
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
