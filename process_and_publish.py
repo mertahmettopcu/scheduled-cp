@@ -88,7 +88,7 @@ def run() -> None:
         log(f"  └─ Signal state checked for {pair}")
 
         should_send = (prev_15m is not None or prev_1h is not None or prev_1d is not None) and (
-            changed_15m or changed_1h or changed_1d
+            changed_1h or changed_1d
         )
 
         if should_send:
