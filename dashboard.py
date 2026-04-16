@@ -7,7 +7,7 @@ import streamlit as st
 from supabase import create_client
 
 ALLOWED_EMAILS = {
-    "seninmailin@gmail.com",
+    "ahmetmerttopcu@gmail.com",
     "izinli1@gmail.com",
 }
 
