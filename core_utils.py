@@ -268,8 +268,10 @@ def build_telegram_message(
     signal_15m: str,
     row_1h: pd.Series,
     signal_1h: str,
+    prev_signal_1h: str | None,
     row_1d: pd.Series,
     signal_1d: str,
+    prev_signal_1d: str | None,
     ichi_details: dict,
     candle_time_15m: str,
     candle_time_1h: str,
@@ -286,7 +288,25 @@ def build_telegram_message(
 
     def sig_label(sig: str, triggered: bool) -> str:
         return f"{sig} (triggered)" if triggered else sig
+    
+    def signal_badge(sig: str) -> str:
+        sig = (sig or "").strip().upper()
+        if sig == "LONG":
+            return "🟢 LONG"
+        if sig == "SHORT":
+            return "🔴 SHORT"
+        return "⚪ NEUTRAL"
 
+    def signal_display(current: str, previous: str | None, triggered: bool) -> str:
+        current_text = signal_badge(current)
+        previous_norm = (previous or "").strip().upper()
+        current_norm = (current or "").strip().upper()
+
+        if triggered and previous_norm and previous_norm != current_norm:
+            return f"{signal_badge(previous_norm)} → {current_text} 🔔"
+
+        return current_text
+        
     app_link = _build_app_link(pair, streamlit_app_url)
 
     lines = [
@@ -301,17 +321,17 @@ def build_telegram_message(
 
     lines.extend([
         "",
-        f"15m: {sig_label(signal_15m, triggered_15m)}",
+        f"15m: {signal_badge(signal_15m)}",
         f"Close: {fmt(row_15m['close'])}",
         "EMA4 > EMA16" if row_15m["ema4"] > row_15m["ema16"] else "EMA4 < EMA16" if row_15m["ema4"] < row_15m["ema16"] else "EMA4 = EMA16",
         "RSI14 > RSI52" if row_15m["rsi14"] > row_15m["rsi52"] else "RSI14 < RSI52" if row_15m["rsi14"] < row_15m["rsi52"] else "RSI14 = RSI52",
         "",
-        f"1h: {sig_label(signal_1h, triggered_1h)}",
+        f"1h: {signal_display(signal_1h, prev_signal_1h, triggered_1h)}",
         f"Close: {fmt(row_1h['close'])}",
         "EMA4 > EMA16" if row_1h["ema4"] > row_1h["ema16"] else "EMA4 < EMA16" if row_1h["ema4"] < row_1h["ema16"] else "EMA4 = EMA16",
         "RSI14 > RSI52" if row_1h["rsi14"] > row_1h["rsi52"] else "RSI14 < RSI52" if row_1h["rsi14"] < row_1h["rsi52"] else "RSI14 = RSI52",
         "",
-        f"1d: {sig_label(signal_1d, triggered_1d)}",
+        f"1d: {signal_display(signal_1d, prev_signal_1d, triggered_1d)}",
         f"Close: {fmt(row_1d['close'])}",
         f"Lagging span: {ichi_details['lagging_span']}",
         ichi_details["conversion_vs_base"],
