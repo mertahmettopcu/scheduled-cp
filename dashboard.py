@@ -6,6 +6,25 @@ import plotly.graph_objects as go
 import streamlit as st
 from supabase import create_client
 
+ALLOWED_EMAILS = {
+    "seninmailin@gmail.com",
+    "izinli1@gmail.com",
+}
+
+if not st.user.is_logged_in:
+    st.title("Giriş gerekli")
+    if st.button("Google ile giriş yap"):
+        st.login()
+    st.stop()
+
+user_email = (st.user.get("email") or "").lower().strip()
+
+if user_email not in ALLOWED_EMAILS:
+    st.error("Erişim izniniz yok")
+    if st.button("Çıkış yap"):
+        st.logout()
+    st.stop()
+
 st.set_page_config(page_title="Crypto Futures Dashboard", layout="wide")
 
 # =========================================================
