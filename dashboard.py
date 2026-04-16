@@ -6,10 +6,37 @@ import plotly.graph_objects as go
 import streamlit as st
 from supabase import create_client
 
-ALLOWED_EMAILS = {
-    "ahmetmerttopcu@gmail.com",
-    "izinli1@gmail.com",
-}
+st.set_page_config(page_title="Crypto Futures Dashboard", layout="wide")
+
+
+def load_allowed_emails() -> set[str]:
+    users_csv_url = st.secrets["access"]["users_csv_url"]
+    df = pd.read_csv(users_csv_url)
+
+    df.columns = [str(c).strip().lower() for c in df.columns]
+
+    if "email" not in df.columns or "active" not in df.columns:
+        st.error("Users sheet must contain 'email' and 'active' columns.")
+        st.stop()
+
+    active_mask = (
+        df["active"]
+        .astype(str)
+        .str.strip()
+        .str.upper()
+        .isin(["TRUE", "1", "YES", "Y"])
+    )
+
+    emails = (
+        df.loc[active_mask, "email"]
+        .dropna()
+        .astype(str)
+        .str.strip()
+        .str.lower()
+    )
+
+    return set(emails.tolist())
+
 
 if not st.user.is_logged_in:
     st.title("Giriş gerekli")
@@ -18,14 +45,13 @@ if not st.user.is_logged_in:
     st.stop()
 
 user_email = (st.user.get("email") or "").lower().strip()
+allowed_emails = load_allowed_emails()
 
-if user_email not in ALLOWED_EMAILS:
+if user_email not in allowed_emails:
     st.error("Erişim izniniz yok")
     if st.button("Çıkış yap"):
         st.logout()
     st.stop()
-
-st.set_page_config(page_title="Crypto Futures Dashboard", layout="wide")
 
 # =========================================================
 # Config / Supabase
