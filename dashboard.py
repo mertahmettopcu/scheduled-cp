@@ -47,10 +47,10 @@ if not st.user.is_logged_in:
 user_email = (st.user.get("email") or "").lower().strip()
 allowed_emails = load_allowed_emails()
 
+st.sidebar.button("Çıkış yap", on_click=st.logout)
+
 if user_email not in allowed_emails:
     st.error("Erişim izniniz yok")
-    if st.button("Çıkış yap"):
-        st.logout()
     st.stop()
 
 # =========================================================
