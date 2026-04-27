@@ -56,7 +56,12 @@ def load_allowed_emails() -> set[str]:
 
     return set(emails.tolist())
 
+params = st.query_params
 
+if params.get("ping") == st.secrets["access"]["keepalive_token"]:
+    st.write("ok")
+    st.stop()
+    
 if not st.user.is_logged_in:
     st.title("Giriş gerekli")
     if st.button("Google ile giriş yap"):
