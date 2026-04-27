@@ -73,7 +73,30 @@ jobs:
           PAGE="$(curl -fsSL 'https://www.vpnbook.com/tr/freevpn/openvpn')"
 
           VPN_USER_DYNAMIC="vpnbook"
-          VPN_PASS_DYNAMIC="$(printf '%s\n' "$PAGE" | grep -A3 -i 'Parola' | grep -oE '[a-zA-Z0-9]{6,20}' | head -n1)"
+
+          VPN_PASS_DYNAMIC="$(python - <<'PY'
+          import re
+          import sys
+
+          page = sys.stdin.read()
+
+          match = re.search(
+              r'Parola\s*</[^>]+>\s*<[^>]+>\s*([A-Za-z0-9]{6,20})',
+              page,
+              re.IGNORECASE,
+          )
+
+          if not match:
+              match = re.search(
+                  r'Parola.*?([A-Za-z0-9]{6,20})',
+                  page,
+                  re.IGNORECASE | re.DOTALL,
+              )
+
+          if match:
+              print(match.group(1))
+          PY
+          <<< "$PAGE")"
 
           if [ -z "$VPN_PASS_DYNAMIC" ]; then
             echo "::error ::VPN password fetch failed."
