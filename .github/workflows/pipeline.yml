@@ -65,16 +65,34 @@ jobs:
 
           chmod 600 vpnbook.ovpn
 
+      - name: Fetch VPNBook credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PAGE="$(curl -fsSL 'https://www.vpnbook.com/tr/freevpn/openvpn')"
+
+          VPN_USER_DYNAMIC="vpnbook"
+          VPN_PASS_DYNAMIC="$(printf '%s\n' "$PAGE" | grep -A3 -i 'Parola' | grep -oE '[a-zA-Z0-9]{6,20}' | head -n1)"
+
+          if [ -z "$VPN_PASS_DYNAMIC" ]; then
+            echo "::error ::VPN password fetch failed."
+            exit 1
+          fi
+
+          echo "::add-mask::$VPN_USER_DYNAMIC"
+          echo "::add-mask::$VPN_PASS_DYNAMIC"
+
+          echo "VPN_USER=$VPN_USER_DYNAMIC" >> "$GITHUB_ENV"
+          echo "VPN_PASS=$VPN_PASS_DYNAMIC" >> "$GITHUB_ENV"
+
       - name: Write tunnel credentials
         shell: bash
-        env:
-          VPN_USER: ${{ secrets.VPN_USER }}
-          VPN_PASS: ${{ secrets.VPN_PASS }}
         run: |
           set -euo pipefail
 
           if [ -z "${VPN_USER:-}" ] || [ -z "${VPN_PASS:-}" ]; then
-            echo "::error ::Missing VPN_USER or VPN_PASS secret."
+            echo "::error ::Missing VPN credentials."
             exit 1
           fi
 
