@@ -70,15 +70,15 @@ jobs:
         run: |
           set -euo pipefail
 
-          PAGE="$(curl -fsSL 'https://www.vpnbook.com/tr/freevpn/openvpn')"
+          curl -fsSL 'https://www.vpnbook.com/tr/freevpn/openvpn' -o vpnbook_page.html
 
           VPN_USER_DYNAMIC="vpnbook"
 
-          VPN_PASS_DYNAMIC="$(PAGE="$PAGE" python - <<'PY'
-          import os
+          VPN_PASS_DYNAMIC="$(python - <<'PY'
           import re
+          from pathlib import Path
 
-          page = os.environ.get("PAGE", "")
+          page = Path("vpnbook_page.html").read_text(encoding="utf-8", errors="ignore")
 
           patterns = [
               r'Parola\s*</[^>]+>\s*<[^>]+>\s*([A-Za-z0-9]{6,20})',
@@ -95,6 +95,8 @@ jobs:
           PY
           )"
 
+          rm -f vpnbook_page.html
+
           if [ -z "$VPN_PASS_DYNAMIC" ]; then
             echo "::error ::VPN password fetch failed."
             exit 1
@@ -105,7 +107,7 @@ jobs:
 
           echo "VPN_USER=$VPN_USER_DYNAMIC" >> "$GITHUB_ENV"
           echo "VPN_PASS=$VPN_PASS_DYNAMIC" >> "$GITHUB_ENV"
-
+          
       - name: Write tunnel credentials
         shell: bash
         run: |
