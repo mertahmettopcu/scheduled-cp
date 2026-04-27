@@ -56,6 +56,41 @@ def load_allowed_emails() -> set[str]:
 
     return set(emails.tolist())
 
+@st.cache_data(ttl=300)
+def load_pair_options() -> list[str]:
+    symbols_csv_url = st.secrets["symbols"]["symbols_csv_url"]
+    df = pd.read_csv(symbols_csv_url)
+
+    df.columns = [str(c).strip().lower() for c in df.columns]
+
+    if "symbol" not in df.columns or "enabled" not in df.columns:
+        st.error("Symbols sheet must contain 'symbol' and 'enabled' columns.")
+        st.stop()
+
+    enabled_mask = (
+        df["enabled"]
+        .astype(str)
+        .str.strip()
+        .str.upper()
+        .isin(["TRUE", "1", "YES", "Y"])
+    )
+
+    symbols = (
+        df.loc[enabled_mask, "symbol"]
+        .dropna()
+        .astype(str)
+        .str.strip()
+        .str.upper()
+    )
+
+    pair_options = sorted(set(symbols.tolist()))
+
+    if not pair_options:
+        st.error("Symbols sheet içinde enabled=TRUE olan symbol bulunamadı.")
+        st.stop()
+
+    return pair_options
+    
 params = st.query_params
 
 if params.get("ping") == st.secrets["access"]["keepalive_token"]:
@@ -82,7 +117,7 @@ if user_email not in allowed_emails:
 # =========================================================
 # Config / Supabase
 # =========================================================
-PAIR_OPTIONS = ["BTCUSDT", "PAXGUSDT"]
+#PAIR_OPTIONS = ["BTCUSDT", "PAXGUSDT"]
 DISPLAY_TZ = "Europe/Istanbul"
 
 
@@ -461,7 +496,9 @@ def make_ichimoku_chart(df: pd.DataFrame, title: str) -> go.Figure:
 st.title("Crypto Futures Strategy Dashboard")
 st.caption("Perpetual futures candles come from Supabase cache populated by your GitHub pipeline.")
 
-selected_pair = st.selectbox("Crypto seç", PAIR_OPTIONS, index=0)
+#selected_pair = st.selectbox("Crypto seç", PAIR_OPTIONS, index=0)
+pair_options = load_pair_options()
+selected_pair = st.selectbox("Crypto seç", pair_options, index=0)
 
 snapshots = load_signal_snapshots(selected_pair)
 hourly = load_candles(selected_pair, "1h")
