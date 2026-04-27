@@ -13,4 +13,4 @@ jobs:
     steps:
       - name: Ping Streamlit app
         run: |
-          curl --max-time 30 --fail "https://scheduled-cp-xgdbr6apphni2zwxayljkbl.streamlit.app/_stcore/health"
+          curl --max-time 30 --fail --write-out "\nHTTP_STATUS:%{http_code}\n" "https://scheduled-cp-xgdbr6apphni2zwxayljkbl.streamlit.app/_stcore/health"
