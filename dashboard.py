@@ -12,6 +12,19 @@ st.markdown("""
 <style>
 footer {visibility: hidden;}
 header {visibility: hidden;}
+
+/* Streamlit sağ alt / profil / deploy kontrol alanlarını gizlemeyi dener */
+[data-testid="stStatusWidget"] {
+    visibility: hidden;
+}
+
+[data-testid="stToolbar"] {
+    visibility: hidden;
+}
+
+[data-testid="stMainMenu"] {
+    visibility: hidden;
+}
 </style>
 """, unsafe_allow_html=True)
 
