@@ -1,0 +1,16 @@
+name: Keep Streamlit Awake
+
+on:
+  schedule:
+    - cron: "0 */4 * * *"
+  workflow_dispatch:
+
+jobs:
+  ping-streamlit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+
+    steps:
+      - name: Ping Streamlit app
+        run: |
+          curl -L --max-time 30 --fail "https://scheduled-cp-xgdbr6apphni2zwxayljkbl.streamlit.app"
