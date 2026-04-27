@@ -8,6 +8,12 @@ from supabase import create_client
 
 st.set_page_config(page_title="Crypto Futures Dashboard", layout="wide")
 
+st.markdown("""
+<style>
+footer {visibility: hidden;}
+</style>
+""", unsafe_allow_html=True)
+
 
 def load_allowed_emails() -> set[str]:
     users_csv_url = st.secrets["access"]["users_csv_url"]
