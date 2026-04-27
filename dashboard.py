@@ -11,6 +11,7 @@ st.set_page_config(page_title="Crypto Futures Dashboard", layout="wide")
 st.markdown("""
 <style>
 footer {visibility: hidden;}
+header {visibility: hidden;}
 </style>
 """, unsafe_allow_html=True)
 
