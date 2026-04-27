@@ -74,29 +74,26 @@ jobs:
 
           VPN_USER_DYNAMIC="vpnbook"
 
-          VPN_PASS_DYNAMIC="$(python - <<'PY'
+          VPN_PASS_DYNAMIC="$(PAGE="$PAGE" python - <<'PY'
+          import os
           import re
-          import sys
 
-          page = sys.stdin.read()
+          page = os.environ.get("PAGE", "")
 
-          match = re.search(
+          patterns = [
               r'Parola\s*</[^>]+>\s*<[^>]+>\s*([A-Za-z0-9]{6,20})',
-              page,
-              re.IGNORECASE,
-          )
+              r'Password\s*</[^>]+>\s*<[^>]+>\s*([A-Za-z0-9]{6,20})',
+              r'Parola.*?([A-Za-z0-9]{6,20})',
+              r'Password.*?([A-Za-z0-9]{6,20})',
+          ]
 
-          if not match:
-              match = re.search(
-                  r'Parola.*?([A-Za-z0-9]{6,20})',
-                  page,
-                  re.IGNORECASE | re.DOTALL,
-              )
-
-          if match:
-              print(match.group(1))
+          for pattern in patterns:
+              match = re.search(pattern, page, re.IGNORECASE | re.DOTALL)
+              if match:
+                  print(match.group(1))
+                  break
           PY
-          <<< "$PAGE")"
+          )"
 
           if [ -z "$VPN_PASS_DYNAMIC" ]; then
             echo "::error ::VPN password fetch failed."
