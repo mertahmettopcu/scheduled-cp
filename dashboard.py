@@ -13,44 +13,19 @@ st.markdown("""
 footer {visibility: hidden;}
 header {visibility: hidden;}
 
-[data-testid="stToolbar"] {
-    visibility: hidden;
-}
-
-[data-testid="stDecoration"] {
-    visibility: hidden;
-}
-
+/* Streamlit sağ alt / profil / deploy kontrol alanlarını gizlemeyi dener */
 [data-testid="stStatusWidget"] {
     visibility: hidden;
 }
 
-/* Streamlit Cloud sağ alt badge / profile / deploy butonları */
-[data-testid="stDeployButton"] {
-    display: none !important;
+[data-testid="stToolbar"] {
+    visibility: hidden;
 }
 
-.stDeployButton {
-    display: none !important;
-}
-
-a[href*="streamlit.io"] {
-    display: none !important;
-}
-
-/* En agresif görsel kapatma: sağ alt köşeyi beyazla örter */
-.hide-streamlit-badge {
-    position: fixed;
-    right: 0;
-    bottom: 0;
-    width: 180px;
-    height: 110px;
-    background: white;
-    z-index: 999999;
+[data-testid="stMainMenu"] {
+    visibility: hidden;
 }
 </style>
-
-<div class="hide-streamlit-badge"></div>
 """, unsafe_allow_html=True)
 
 def load_allowed_emails() -> set[str]:
