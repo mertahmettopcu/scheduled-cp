@@ -67,8 +67,6 @@ jobs:
 
       - name: Fetch VPNBook credentials
         shell: bash
-        env:
-          VPN_PASS_SECRET: ${{ secrets.VPN_PASS }}
         run: |
           set -euo pipefail
 
@@ -125,16 +123,6 @@ jobs:
 
           echo "::add-mask::$VPN_USER_DYNAMIC"
           echo "::add-mask::$VPN_PASS_DYNAMIC"
-          echo "::add-mask::$VPN_PASS_SECRET"
-
-          if [ "$VPN_PASS_DYNAMIC" = "$VPN_PASS_SECRET" ]; then
-            echo "Fetched VPN password matches current GitHub secret."
-          else
-            echo "::error ::Fetched VPN password does NOT match current GitHub secret."
-            echo "Fetched length: ${#VPN_PASS_DYNAMIC}"
-            echo "Secret length: ${#VPN_PASS_SECRET}"
-            exit 1
-          fi
 
           echo "VPN_USER=$VPN_USER_DYNAMIC" >> "$GITHUB_ENV"
           echo "VPN_PASS=$VPN_PASS_DYNAMIC" >> "$GITHUB_ENV"
@@ -197,7 +185,6 @@ jobs:
           )
 
           success=0
-          used_endpoint=""
           ip_output=""
 
           for endpoint in "${endpoints[@]}"; do
@@ -209,7 +196,6 @@ jobs:
                 if [ -n "$ip_output" ]; then
                   echo "Public IP check succeeded."
                   success=1
-                  used_endpoint="$endpoint"
                   break
                 fi
               fi
