@@ -82,11 +82,10 @@ jobs:
 
           page = Path("vpnbook_page.html").read_text(encoding="utf-8", errors="ignore")
 
-          # Daha kontrollü: Parola label'ından sonraki yakın HTML alanında ara
           match = re.search(
-              r'PAROLA.*?([A-Za-z0-9]{6,20})',
+              r'>\s*PAROLA\s*</p>\s*<p[^>]*>\s*([A-Za-z0-9]{6,20})\s*</p>',
               page,
-              re.IGNORECASE | re.DOTALL,
+              re.IGNORECASE,
           )
 
           if match:
