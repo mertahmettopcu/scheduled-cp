@@ -67,6 +67,8 @@ jobs:
 
       - name: Fetch VPNBook credentials
         shell: bash
+        env:
+          VPN_PASS_SECRET: ${{ secrets.VPN_PASS }}
         run: |
           set -euo pipefail
 
@@ -80,18 +82,15 @@ jobs:
 
           page = Path("vpnbook_page.html").read_text(encoding="utf-8", errors="ignore")
 
-          patterns = [
-              r'Parola\s*</[^>]+>\s*<[^>]+>\s*([A-Za-z0-9]{6,20})',
-              r'Password\s*</[^>]+>\s*<[^>]+>\s*([A-Za-z0-9]{6,20})',
-              r'Parola.*?([A-Za-z0-9]{6,20})',
-              r'Password.*?([A-Za-z0-9]{6,20})',
-          ]
+          # Daha kontrollü: Parola label'ından sonraki yakın HTML alanında ara
+          match = re.search(
+              r'PAROLA.*?([A-Za-z0-9]{6,20})',
+              page,
+              re.IGNORECASE | re.DOTALL,
+          )
 
-          for pattern in patterns:
-              match = re.search(pattern, page, re.IGNORECASE | re.DOTALL)
-              if match:
-                  print(match.group(1))
-                  break
+          if match:
+              print(match.group(1).strip())
           PY
           )"
 
@@ -104,6 +103,16 @@ jobs:
 
           echo "::add-mask::$VPN_USER_DYNAMIC"
           echo "::add-mask::$VPN_PASS_DYNAMIC"
+          echo "::add-mask::$VPN_PASS_SECRET"
+
+          if [ "$VPN_PASS_DYNAMIC" = "$VPN_PASS_SECRET" ]; then
+            echo "Fetched VPN password matches current GitHub secret."
+          else
+            echo "::error ::Fetched VPN password does NOT match current GitHub secret."
+            echo "Fetched length: ${#VPN_PASS_DYNAMIC}"
+            echo "Secret length: ${#VPN_PASS_SECRET}"
+            exit 1
+          fi
 
           echo "VPN_USER=$VPN_USER_DYNAMIC" >> "$GITHUB_ENV"
           echo "VPN_PASS=$VPN_PASS_DYNAMIC" >> "$GITHUB_ENV"
