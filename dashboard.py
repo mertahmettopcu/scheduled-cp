@@ -494,7 +494,7 @@ def make_ichimoku_chart(df: pd.DataFrame, title: str) -> go.Figure:
 # UI
 # =========================================================
 st.title("Crypto Futures Strategy Dashboard")
-st.caption("Perpetual futures candles come from Supabase cache populated by your GitHub pipeline.")
+#st.caption("Perpetual futures candles come from Supabase cache populated by your GitHub pipeline.")
 
 #selected_pair = st.selectbox("Crypto seç", PAIR_OPTIONS, index=0)
 pair_options = load_pair_options()
