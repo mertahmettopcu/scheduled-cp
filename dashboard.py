@@ -209,7 +209,11 @@ if not user_email:
             st.error("Google login URL oluşturulamadı.")
             st.stop()
 
-        st.link_button("Google ile giriş yap", login_url)
+        #st.link_button("Google ile giriş yap", login_url)
+        st.markdown(
+            f'<a href="{login_url}" target="_self"><button style="background-color:#FF4B4B;color:white;border:none;padding:0.5rem 1rem;border-radius:0.5rem;cursor:pointer;font-size:1rem;">Google ile giriş yap</button></a>',
+            unsafe_allow_html=True,
+            )
 
     except Exception:
         st.error("Google login başlatılamadı.")
