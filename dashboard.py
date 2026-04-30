@@ -28,10 +28,7 @@ header {visibility: hidden;}
 </style>
 """, unsafe_allow_html=True)
 
-# OAuth/session state stabilizasyonu
-if "auth_session_initialized" not in st.session_state:
-    st.session_state.auth_session_initialized = True
-    st.rerun()
+
     
 def load_allowed_emails() -> set[str]:
     users_csv_url = st.secrets["access"]["users_csv_url"]
@@ -102,22 +99,6 @@ if params.get("ping") == st.secrets["access"]["keepalive_token"]:
     st.write("ok")
     st.stop()
     
-if not st.user.is_logged_in:
-    st.title("Giriş gerekli")
-    if st.button("Google ile giriş yap"):
-        st.login("google")
-    st.stop()
-
-user_email = (st.user.get("email") or "").lower().strip()
-allowed_emails = load_allowed_emails()
-
-#st.sidebar.button("Çıkış yap", on_click=st.logout)
-if st.button("Çıkış yap"):
-    st.logout()
-
-if user_email not in allowed_emails:
-    st.error("Erişim izniniz yok")
-    st.stop()
 
 # =========================================================
 # Config / Supabase
@@ -157,6 +138,99 @@ def supabase_client():
 
 supabase = supabase_client()
 
+
+# =========================================================
+# Auth / Access Control
+# =========================================================
+APP_URL = "https://scheduled-cp-xgdbr6apphni2zwxayljkbl.streamlit.app"
+
+
+def _get_user_email_from_session() -> str | None:
+    access_token = st.session_state.get("sb_access_token")
+    if not access_token:
+        return None
+
+    try:
+        user_response = supabase.auth.get_user(access_token)
+        user = getattr(user_response, "user", None)
+        email = getattr(user, "email", None)
+        return email.lower().strip() if email else None
+    except Exception:
+        st.session_state.pop("sb_access_token", None)
+        st.session_state.pop("sb_refresh_token", None)
+        return None
+
+
+params = st.query_params
+
+if params.get("ping") == st.secrets["access"]["keepalive_token"]:
+    st.write("ok")
+    st.stop()
+
+if "code" in params and "sb_access_token" not in st.session_state:
+    try:
+        session_response = supabase.auth.exchange_code_for_session(
+            {"auth_code": params["code"]}
+        )
+
+        session = getattr(session_response, "session", None)
+        if session is None:
+            st.error("Login session could not be created.")
+            st.stop()
+
+        st.session_state["sb_access_token"] = session.access_token
+        st.session_state["sb_refresh_token"] = session.refresh_token
+
+        st.query_params.clear()
+        st.rerun()
+
+    except Exception:
+        st.error("Google login tamamlanamadı. Lütfen tekrar deneyin.")
+        st.stop()
+
+user_email = _get_user_email_from_session()
+
+if not user_email:
+    st.title("Giriş gerekli")
+
+    try:
+        oauth_response = supabase.auth.sign_in_with_oauth(
+            {
+                "provider": "google",
+                "options": {
+                    "redirect_to": APP_URL,
+                },
+            }
+        )
+
+        login_url = getattr(oauth_response, "url", None)
+
+        if not login_url:
+            st.error("Google login URL oluşturulamadı.")
+            st.stop()
+
+        st.link_button("Google ile giriş yap", login_url)
+
+    except Exception:
+        st.error("Google login başlatılamadı.")
+        st.stop()
+
+    st.stop()
+
+allowed_emails = load_allowed_emails()
+
+if user_email not in allowed_emails:
+    st.error("Erişim izniniz yok")
+    if st.button("Çıkış yap"):
+        st.session_state.pop("sb_access_token", None)
+        st.session_state.pop("sb_refresh_token", None)
+        st.rerun()
+    st.stop()
+
+if st.button("Çıkış yap"):
+    st.session_state.pop("sb_access_token", None)
+    st.session_state.pop("sb_refresh_token", None)
+    st.rerun()
 
 # =========================================================
 # Helpers
