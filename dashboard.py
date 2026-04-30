@@ -105,7 +105,7 @@ if params.get("ping") == st.secrets["access"]["keepalive_token"]:
 if not st.user.is_logged_in:
     st.title("Giriş gerekli")
     if st.button("Google ile giriş yap"):
-        st.login()
+        st.login("google")
     st.stop()
 
 user_email = (st.user.get("email") or "").lower().strip()
