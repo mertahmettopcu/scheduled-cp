@@ -28,6 +28,11 @@ header {visibility: hidden;}
 </style>
 """, unsafe_allow_html=True)
 
+# OAuth/session state stabilizasyonu
+if "auth_session_initialized" not in st.session_state:
+    st.session_state.auth_session_initialized = True
+    st.rerun()
+    
 def load_allowed_emails() -> set[str]:
     users_csv_url = st.secrets["access"]["users_csv_url"]
     df = pd.read_csv(users_csv_url)
@@ -100,7 +105,7 @@ if params.get("ping") == st.secrets["access"]["keepalive_token"]:
 if not st.user.is_logged_in:
     st.title("Giriş gerekli")
     if st.button("Google ile giriş yap"):
-        st.login("google")
+        st.login()
     st.stop()
 
 user_email = (st.user.get("email") or "").lower().strip()
