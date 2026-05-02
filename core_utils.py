@@ -97,7 +97,7 @@ def klines_to_df(pair: str, interval: str, raw: List[List]) -> pd.DataFrame:
 
 def add_ema_rsi_features(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
-    for length in (4, 16, 65, 120):
+    for length in (4, 16, 65, 120, 168):
         out[f"ema{length}"] = out["close"].ewm(span=length, adjust=False).mean()
 
     delta = out["close"].diff()
@@ -120,12 +120,14 @@ def add_ema_rsi_features(df: pd.DataFrame) -> pd.DataFrame:
     out["long_signal"] = (
         (out["ema4"] > out["ema16"]) &
         (prev_ema4 <= prev_ema16) &
-        (out["rsi14"] > out["rsi52"])
+        (out["rsi14"] > out["rsi52"])&
+        (out["rsi14"]>=50)
     )
     out["short_signal"] = (
         (out["ema4"] < out["ema16"]) &
         (prev_ema4 >= prev_ema16) &
-        (out["rsi14"] < out["rsi52"])
+        (out["rsi14"] < out["rsi52"])&
+        (out["rsi14"]<=50)
     )
     return out
 
