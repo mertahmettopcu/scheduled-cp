@@ -365,6 +365,7 @@ def latest_strategy_snapshot(pair: str, timeframe: str, df: pd.DataFrame) -> Dic
         "ema16": _safe_float(last["ema16"]),
         "ema65": _safe_float(last["ema65"]),
         "ema120": _safe_float(last["ema120"]),
+        "ema168": _safe_float(last["ema168"]),
         "rsi14": _safe_float(last["rsi14"]),
         "rsi52": _safe_float(last["rsi52"]),
         "ema4_slope": _safe_float(last["ema4_slope"]),
