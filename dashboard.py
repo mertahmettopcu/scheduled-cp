@@ -327,7 +327,7 @@ def load_signal_snapshots(pair: str) -> pd.DataFrame:
 def add_ema_rsi(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
 
-    for length in (4, 16, 65, 120):
+    for length in (4, 16, 65, 120, 168):
         out[f"ema{length}"] = out["close"].ewm(span=length, adjust=False).mean()
 
     delta = out["close"].diff()
@@ -409,7 +409,7 @@ def make_price_ema_chart(df: pd.DataFrame, title: str) -> go.Figure:
         )
     )
 
-    for length in (4, 16, 65, 120):
+    for length in (4, 16, 65, 120, 168):
         fig.add_trace(
             go.Scatter(
                 x=plot_df["display_time"],
@@ -619,6 +619,7 @@ if not snapshots.empty:
         "ema16",
         "ema65",
         "ema120",
+        "ema168",
         "rsi14",
         "rsi52",
         "signal",
