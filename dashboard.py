@@ -272,7 +272,7 @@ def load_candles(pair: str, timeframe: str) -> pd.DataFrame:
         .eq("pair", pair)
         .eq("timeframe", timeframe)
         .order("open_time", desc=True)
-        .limit(500)
+        .limit(1500)
         .execute()
     )
     df = pd.DataFrame(r.data or [])
