@@ -94,11 +94,39 @@ def klines_to_df(pair: str, interval: str, raw: List[List]) -> pd.DataFrame:
     df = df.drop(columns=["ignore"]).sort_values("open_time").reset_index(drop=True)
     return df
 
+def ema_with_sma_seed(series: pd.Series, length: int) -> pd.Series:
+    alpha = 2 / (length + 1)
+    result = pd.Series(index=series.index, dtype="float64")
 
+    if len(series) < length:
+        return result
+
+    first_ema_position = length - 1
+    result.iloc[first_ema_position] = series.iloc[:length].mean()
+
+    for i in range(length, len(series)):
+        result.iloc[i] = (
+            alpha * series.iloc[i]
+            + (1 - alpha) * result.iloc[i - 1]
+        )
+
+    return result
+    
 def add_ema_rsi_features(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
+
+    if "open_time" in out.columns:
+        out = out.sort_values("open_time").reset_index(drop=True)
+
     for length in (4, 16, 65, 120, 168):
         out[f"ema{length}"] = out["close"].ewm(span=length, adjust=False).mean()
+
+    # Temporary EMA168 diagnostics.
+    # Bunlar strateji sinyalini değiştirmez; sadece Binance ile hangi hesap eşleşiyor görmek için.
+    out["ema168_adjust_false"] = out["close"].ewm(span=168, adjust=False).mean()
+    out["ema168_adjust_true"] = out["close"].ewm(span=168, adjust=True).mean()
+    out["sma168"] = out["close"].rolling(168).mean()
+    out["ema168_sma_seed"] = ema_with_sma_seed(out["close"], 168)
 
     delta = out["close"].diff()
     gain = delta.clip(lower=0.0)
@@ -366,6 +394,16 @@ def latest_strategy_snapshot(pair: str, timeframe: str, df: pd.DataFrame) -> Dic
         "ema65": _safe_float(last["ema65"]),
         "ema120": _safe_float(last["ema120"]),
         "ema168": _safe_float(last["ema168"]),
+        "ema168_adjust_false": _safe_float(last.get("ema168_adjust_false")),
+        "ema168_adjust_true": _safe_float(last.get("ema168_adjust_true")),
+        "sma168": _safe_float(last.get("sma168")),
+        "ema168_sma_seed": _safe_float(last.get("ema168_sma_seed")),
+        "ema_calc_candle_count": int(len(df_feat)),
+        "ema_calc_first_open_time": (
+            df_feat.iloc[0]["open_time"].isoformat().replace("+00:00", "Z")
+            if len(df_feat) > 0 and "open_time" in df_feat.columns
+            else None
+        ),
         "rsi14": _safe_float(last["rsi14"]),
         "rsi52": _safe_float(last["rsi52"]),
         "ema4_slope": _safe_float(last["ema4_slope"]),
