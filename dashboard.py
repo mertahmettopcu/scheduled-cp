@@ -324,11 +324,39 @@ def load_signal_snapshots(pair: str) -> pd.DataFrame:
 # =========================================================
 # Indicator helpers
 # =========================================================
+def ema_with_sma_seed(series: pd.Series, length: int) -> pd.Series:
+    alpha = 2 / (length + 1)
+    result = pd.Series(index=series.index, dtype="float64")
+
+    if len(series) < length:
+        return result
+
+    first_ema_position = length - 1
+    result.iloc[first_ema_position] = series.iloc[:length].mean()
+
+    for i in range(length, len(series)):
+        result.iloc[i] = (
+            alpha * series.iloc[i]
+            + (1 - alpha) * result.iloc[i - 1]
+        )
+
+    return result
+
+
 def add_ema_rsi(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
 
+    if "open_time" in out.columns:
+        out = out.sort_values("open_time").reset_index(drop=True)
+
     for length in (4, 16, 65, 120, 168):
         out[f"ema{length}"] = out["close"].ewm(span=length, adjust=False).mean()
+
+    # Temporary debug columns for Binance comparison
+    out["ema168_adjust_false"] = out["close"].ewm(span=168, adjust=False).mean()
+    out["ema168_adjust_true"] = out["close"].ewm(span=168, adjust=True).mean()
+    out["sma168"] = out["close"].rolling(168).mean()
+    out["ema168_sma_seed"] = ema_with_sma_seed(out["close"], 168)
 
     delta = out["close"].diff()
     gain = delta.clip(lower=0.0)
@@ -399,15 +427,38 @@ def make_price_ema_chart(df: pd.DataFrame, title: str) -> go.Figure:
     fig = go.Figure()
 
     fig.add_trace(
-        go.Candlestick(
-            x=plot_df["display_time"],
-            open=plot_df["open"],
-            high=plot_df["high"],
-            low=plot_df["low"],
-            close=plot_df["close"],
-            name="Price",
-        )
+    go.Candlestick(
+        x=plot_df["display_time"],
+        open=plot_df["open"],
+        high=plot_df["high"],
+        low=plot_df["low"],
+        close=plot_df["close"],
+        name="Price",
+        customdata=plot_df[
+            [
+                "ema168",
+                "ema168_adjust_false",
+                "ema168_adjust_true",
+                "sma168",
+                "ema168_sma_seed",
+            ]
+        ],
+        hovertemplate=(
+            "Time: %{x}<br>"
+            "Open: %{open}<br>"
+            "High: %{high}<br>"
+            "Low: %{low}<br>"
+            "Close: %{close}<br>"
+            "<br>"
+            "EMA168 current: %{customdata[0]:.4f}<br>"
+            "EMA168 adjust_false: %{customdata[1]:.4f}<br>"
+            "EMA168 adjust_true: %{customdata[2]:.4f}<br>"
+            "SMA168: %{customdata[3]:.4f}<br>"
+            "EMA168 SMA seed: %{customdata[4]:.4f}<br>"
+            "<extra></extra>"
+        ),
     )
+)
 
     for length in (4, 16, 65, 120, 168):
         fig.add_trace(
