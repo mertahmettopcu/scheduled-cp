@@ -26,14 +26,14 @@ def _normalize_enabled(value: object) -> bool:
     return text in {"TRUE", "1", "YES", "Y"}
 
 
-def _load_pairs_from_google_sheets_csv(url: str, retries: int = 2) -> list[str]:
+def _load_pairs_from_google_sheets_csv(url: str, retries: int = 3) -> list[str]:
     last_error: Exception | None = None
 
     for attempt in range(1, retries + 1):
         try:
             log(f"Trying remote symbol list (attempt {attempt}/{retries})")
 
-            response = requests.get(url, timeout=20)
+            response = requests.get(url, timeout=30)
             response.raise_for_status()
 
             df = pd.read_csv(StringIO(response.text))
