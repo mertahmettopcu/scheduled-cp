@@ -320,7 +320,36 @@ def load_signal_snapshots(pair: str) -> pd.DataFrame:
 
     return df.sort_values("timeframe").reset_index(drop=True)
 
+@st.cache_data(ttl=60)
+def load_manual_zones(pair: str) -> pd.DataFrame:
+    r = (
+        supabase.table("manual_zones")
+        .select("*")
+        .eq("symbol", pair)
+        .eq("active", True)
+        .order("sort_order", desc=False)
+        .execute()
+    )
 
+    df = pd.DataFrame(r.data or [])
+    if df.empty:
+        return df
+
+    if "zone_value" in df.columns:
+        df["zone_value"] = pd.to_numeric(df["zone_value"], errors="coerce")
+
+    if "sort_order" in df.columns:
+        df["sort_order"] = pd.to_numeric(df["sort_order"], errors="coerce")
+
+    df = (
+        df
+        .dropna(subset=["zone_value"])
+        .sort_values("zone_value", ascending=False)
+        .reset_index(drop=True)
+    )
+
+    return df
+    
 # =========================================================
 # Indicator helpers
 # =========================================================
@@ -420,7 +449,99 @@ def add_ichimoku(df: pd.DataFrame) -> pd.DataFrame:
 # =========================================================
 # Chart builders
 # =========================================================
-def make_price_ema_chart(df: pd.DataFrame, title: str) -> go.Figure:
+
+def filter_zones_for_visible_price_range(
+    chart_df: pd.DataFrame,
+    zones: pd.DataFrame,
+) -> pd.DataFrame:
+    if chart_df.empty or zones is None or zones.empty:
+        return pd.DataFrame()
+
+    if "low" not in chart_df.columns or "high" not in chart_df.columns:
+        return pd.DataFrame()
+
+    visible_low = pd.to_numeric(chart_df["low"], errors="coerce").min()
+    visible_high = pd.to_numeric(chart_df["high"], errors="coerce").max()
+
+    if pd.isna(visible_low) or pd.isna(visible_high):
+        return pd.DataFrame()
+
+    work = zones.copy()
+    work["zone_value"] = pd.to_numeric(work["zone_value"], errors="coerce")
+    work = work.dropna(subset=["zone_value"])
+
+    if work.empty:
+        return work
+
+    zones_inside_range = work[
+        (work["zone_value"] >= visible_low)
+        & (work["zone_value"] <= visible_high)
+    ]
+
+    nearest_zone_above = (
+        work[work["zone_value"] > visible_high]
+        .sort_values("zone_value", ascending=True)
+        .head(1)
+    )
+
+    nearest_zone_below = (
+        work[work["zone_value"] < visible_low]
+        .sort_values("zone_value", ascending=False)
+        .head(1)
+    )
+
+    selected = pd.concat(
+        [nearest_zone_above, zones_inside_range, nearest_zone_below],
+        ignore_index=True,
+    )
+
+    selected = (
+        selected
+        .drop_duplicates(subset=["zone_value"])
+        .sort_values("zone_value", ascending=False)
+        .reset_index(drop=True)
+    )
+
+    return selected
+
+
+def add_manual_zone_lines(
+    fig: go.Figure,
+    chart_df: pd.DataFrame,
+    zones: pd.DataFrame,
+    show_zones: bool,
+) -> go.Figure:
+    if not show_zones or zones is None or zones.empty:
+        return fig
+
+    selected_zones = filter_zones_for_visible_price_range(chart_df, zones)
+
+    if selected_zones.empty:
+        return fig
+
+    for _, zone in selected_zones.iterrows():
+        zone_value = zone.get("zone_value")
+
+        if pd.isna(zone_value):
+            continue
+
+        note = zone.get("note")
+        label = f"Zone {float(zone_value):.2f}"
+
+        if note is not None and str(note).strip() and str(note).lower() != "nan":
+            label = f"{label} — {str(note).strip()}"
+
+        fig.add_hline(
+            y=float(zone_value),
+            line_width=1,
+            line_dash="dot",
+            annotation_text=label,
+            annotation_position="right",
+        )
+
+    return fig
+    
+def make_price_ema_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | None = None, show_zones: bool = False,) -> go.Figure:
     plot_df = df.copy()
     plot_df["display_time"] = plot_df["open_time"].dt.tz_convert(DISPLAY_TZ)
 
@@ -469,7 +590,12 @@ def make_price_ema_chart(df: pd.DataFrame, title: str) -> go.Figure:
                 name=f"EMA{length}",
             )
         )
-
+    fig = add_manual_zone_lines(
+        fig=fig,
+        chart_df=plot_df,
+        zones=zones,
+        show_zones=show_zones,
+    )
     fig.update_layout(
         title=title,
         xaxis_title="Time",
@@ -486,7 +612,7 @@ def make_price_ema_chart(df: pd.DataFrame, title: str) -> go.Figure:
     return fig
 
 
-def make_ichimoku_chart(df: pd.DataFrame, title: str) -> go.Figure:
+def make_ichimoku_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | None = None, show_zones: bool = False,) -> go.Figure:
     plot_df = df.copy()
     plot_df["display_time"] = plot_df["open_time"].dt.tz_convert(DISPLAY_TZ)
 
@@ -633,11 +759,29 @@ st.title("Crypto Futures Strategy Dashboard")
 #selected_pair = st.selectbox("Crypto seç", PAIR_OPTIONS, index=0)
 pair_options = load_pair_options()
 selected_pair = st.selectbox("Crypto seç", pair_options, index=0)
+st.markdown("### Grafik ayarları")
+
+col1, col2, col3 = st.columns(3)
+
+with col1:
+    show_zones_1h = st.toggle("1H yakın zone çizgileri", value=True)
+
+with col2:
+    show_zones_15m = st.toggle("15M yakın zone çizgileri", value=True)
+
+with col3:
+    show_zones_1d = st.toggle("1D yakın zone çizgileri", value=False)
 
 snapshots = load_signal_snapshots(selected_pair)
 hourly = load_candles(selected_pair, "1h")
 m15 = load_candles(selected_pair, "15m")
 daily = load_candles(selected_pair, "1d")
+manual_zones = load_manual_zones(selected_pair)
+
+if manual_zones.empty:
+    st.info("Bu parite için aktif manual zone bulunamadı.")
+else:
+    st.caption(f"Aktif manual zone sayısı: {len(manual_zones)}")
 
 if hourly.empty or m15.empty or daily.empty:
     st.warning("Bu coin için gerekli candle verileri Supabase'te yok. Önce pipeline'ı çalıştır.")
@@ -703,18 +847,27 @@ if not snapshots.empty:
 
 st.subheader(f"{selected_pair} — 1H (son 2 gün)")
 st.plotly_chart(
-    make_price_ema_chart(hourly_chart, f"{selected_pair} 1H — Price + EMA4/16/65/120"),
+    make_price_ema_chart(hourly_chart, f"{selected_pair} 1H — Price + EMA4/16/65/120",
+        zones=manual_zones,
+        show_zones=show_zones_1h,
+                        ),
     use_container_width=True,
 )
 
 st.subheader(f"{selected_pair} — 15M (son 1 gün)")
 st.plotly_chart(
-    make_price_ema_chart(m15_chart, f"{selected_pair} 15M — Price + EMA4/16/65/120"),
+    make_price_ema_chart(m15_chart, f"{selected_pair} 15M — Price + EMA4/16/65/120",
+        zones=manual_zones,
+        show_zones=show_zones_15m,
+                        ),
     use_container_width=True,
 )
 
 st.subheader(f"{selected_pair} — 1D Ichimoku")
 st.plotly_chart(
-    make_ichimoku_chart(daily_chart, f"{selected_pair} 1D — Ichimoku"),
+    make_ichimoku_chart(daily_chart, f"{selected_pair} 1D — Ichimoku",
+        zones=manual_zones,
+        show_zones=show_zones_1d,
+                       ),
     use_container_width=True,
 )
