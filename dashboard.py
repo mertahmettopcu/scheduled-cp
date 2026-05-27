@@ -449,7 +449,82 @@ def add_ichimoku(df: pd.DataFrame) -> pd.DataFrame:
 # =========================================================
 # Chart builders
 # =========================================================
+def add_hover_zone_context(
+    chart_df: pd.DataFrame,
+    zones: pd.DataFrame,
+    zone_buffer: float = 0.0,
+) -> pd.DataFrame:
+    out = chart_df.copy()
 
+    out["hover_upper_zone"] = pd.NA
+    out["hover_lower_zone"] = pd.NA
+    out["hover_upper_zone_minus_buffer"] = pd.NA
+    out["hover_lower_zone_plus_buffer"] = pd.NA
+
+    if zones is None or zones.empty or "close" not in out.columns:
+        return out
+
+    work = zones.copy()
+    work["zone_value"] = pd.to_numeric(work["zone_value"], errors="coerce")
+    zone_values = (
+        work["zone_value"]
+        .dropna()
+        .drop_duplicates()
+        .sort_values(ascending=False)
+        .tolist()
+    )
+
+    if not zone_values:
+        return out
+
+    buffer_value = max(float(zone_buffer or 0), 0.0)
+
+    def _zone_context(close_price):
+        if pd.isna(close_price):
+            return pd.Series(
+                {
+                    "hover_upper_zone": pd.NA,
+                    "hover_lower_zone": pd.NA,
+                    "hover_upper_zone_minus_buffer": pd.NA,
+                    "hover_lower_zone_plus_buffer": pd.NA,
+                }
+            )
+
+        close_price = float(close_price)
+
+        upper_candidates = [z for z in zone_values if z > close_price]
+        lower_candidates = [z for z in zone_values if z < close_price]
+
+        upper_zone = min(upper_candidates) if upper_candidates else pd.NA
+        lower_zone = max(lower_candidates) if lower_candidates else pd.NA
+
+        upper_minus_buffer = (
+            float(upper_zone) - buffer_value
+            if not pd.isna(upper_zone)
+            else pd.NA
+        )
+
+        lower_plus_buffer = (
+            float(lower_zone) + buffer_value
+            if not pd.isna(lower_zone)
+            else pd.NA
+        )
+
+        return pd.Series(
+            {
+                "hover_upper_zone": upper_zone,
+                "hover_lower_zone": lower_zone,
+                "hover_upper_zone_minus_buffer": upper_minus_buffer,
+                "hover_lower_zone_plus_buffer": lower_plus_buffer,
+            }
+        )
+
+    zone_context = out["close"].apply(_zone_context)
+
+    out = pd.concat([out, zone_context], axis=1)
+
+    return out
+    
 def filter_zones_for_visible_price_range(
     chart_df: pd.DataFrame,
     zones: pd.DataFrame,
@@ -558,6 +633,18 @@ def add_manual_zone_lines(
 def make_price_ema_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | None = None, show_zones: bool = False, zone_buffer: float = 0.0,) -> go.Figure:
     plot_df = df.copy()
     plot_df["display_time"] = plot_df["open_time"].dt.tz_convert(DISPLAY_TZ)
+    
+    if show_zones:
+        plot_df = add_hover_zone_context(
+            chart_df=plot_df,
+            zones=zones,
+            zone_buffer=zone_buffer,
+        )
+    else:
+        plot_df["hover_upper_zone"] = pd.NA
+        plot_df["hover_lower_zone"] = pd.NA
+        plot_df["hover_upper_zone_minus_buffer"] = pd.NA
+        plot_df["hover_lower_zone_plus_buffer"] = pd.NA
 
     fig = go.Figure()
 
@@ -576,6 +663,10 @@ def make_price_ema_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | Non
                 "ema168_adjust_true",
                 "sma168",
                 "ema168_sma_seed",
+                "hover_upper_zone",
+                "hover_lower_zone",
+                "hover_upper_zone_minus_buffer",
+                "hover_lower_zone_plus_buffer",
             ]
         ],
         hovertemplate=(
@@ -590,6 +681,12 @@ def make_price_ema_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | Non
             "EMA168 adjust_true: %{customdata[2]:.4f}<br>"
             "SMA168: %{customdata[3]:.4f}<br>"
             "EMA168 SMA seed: %{customdata[4]:.4f}<br>"
+            "<br>"
+            "Manual Zone Range:<br>"
+            "Upper Zone: %{customdata[5]:.2f}<br>"
+            "Lower Zone: %{customdata[6]:.2f}<br>"
+            "Upper Zone - Buffer: %{customdata[7]:.2f}<br>"
+            "Lower Zone + Buffer: %{customdata[8]:.2f}<br>"
             "<extra></extra>"
         ),
     )
@@ -630,6 +727,18 @@ def make_price_ema_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | Non
 def make_ichimoku_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | None = None, show_zones: bool = False,zone_buffer: float = 0.0,) -> go.Figure:
     plot_df = df.copy()
     plot_df["display_time"] = plot_df["open_time"].dt.tz_convert(DISPLAY_TZ)
+    
+    if show_zones:
+        plot_df = add_hover_zone_context(
+            chart_df=plot_df,
+            zones=zones,
+            zone_buffer=zone_buffer,
+        )
+    else:
+        plot_df["hover_upper_zone"] = pd.NA
+        plot_df["hover_lower_zone"] = pd.NA
+        plot_df["hover_upper_zone_minus_buffer"] = pd.NA
+        plot_df["hover_lower_zone_plus_buffer"] = pd.NA
 
     # Future 26-day extension using unshifted values
     future_src = plot_df.tail(26).copy()
@@ -651,14 +760,36 @@ def make_ichimoku_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | None
     # Price
     fig.add_trace(
         go.Candlestick(
-            x=plot_df["display_time"],
-            open=plot_df["open"],
-            high=plot_df["high"],
-            low=plot_df["low"],
-            close=plot_df["close"],
-            name="Price",
-        )
-    )
+                    x=plot_df["display_time"],
+                    open=plot_df["open"],
+                    high=plot_df["high"],
+                    low=plot_df["low"],
+                    close=plot_df["close"],
+                    name="Price",
+                    customdata=plot_df[
+                        [
+                            "hover_upper_zone",
+                            "hover_lower_zone",
+                            "hover_upper_zone_minus_buffer",
+                            "hover_lower_zone_plus_buffer",
+                        ]
+                    ],
+                    hovertemplate=(
+                        "Time: %{x}<br>"
+                        "Open: %{open}<br>"
+                        "High: %{high}<br>"
+                        "Low: %{low}<br>"
+                        "Close: %{close}<br>"
+                        "<br>"
+                        "Manual Zone Range:<br>"
+                        "Upper Zone: %{customdata[0]:.2f}<br>"
+                        "Lower Zone: %{customdata[1]:.2f}<br>"
+                        "Upper Zone - Buffer: %{customdata[2]:.2f}<br>"
+                        "Lower Zone + Buffer: %{customdata[3]:.2f}<br>"
+                        "<extra></extra>"
+                    ),
+                )
+            )
 
     # Tenkan / Kijun / Chikou
     fig.add_trace(
