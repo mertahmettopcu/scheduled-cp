@@ -42,6 +42,13 @@ jobs:
           GOOGLE_SHEETS_SYMBOLS_CSV_URL: ${{ vars.GOOGLE_SHEETS_SYMBOLS_CSV_URL }}
           FETCH_SOURCE_MODE: prepare_pairs
         run: python fetch_source_data.py
+
+      - name: Sync manual zones
+        env:
+          GOOGLE_SHEETS_ZONES_CSV_URL: ${{ vars.GOOGLE_SHEETS_ZONES_CSV_URL }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python sync_manual_zones.py
         
       - name: Write tunnel config
         shell: bash
