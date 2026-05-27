@@ -510,6 +510,7 @@ def add_manual_zone_lines(
     chart_df: pd.DataFrame,
     zones: pd.DataFrame,
     show_zones: bool,
+    zone_buffer: float = 0.0,
 ) -> go.Figure:
     if not show_zones or zones is None or zones.empty:
         return fig
@@ -519,20 +520,33 @@ def add_manual_zone_lines(
     if selected_zones.empty:
         return fig
 
+    buffer_value = max(float(zone_buffer or 0), 0.0)
+
     for _, zone in selected_zones.iterrows():
         zone_value = zone.get("zone_value")
 
         if pd.isna(zone_value):
             continue
 
+        zone_value = float(zone_value)
+
         note = zone.get("note")
-        label = f"Zone {float(zone_value):.2f}"
+        label = f"Zone {zone_value:.2f}"
 
         if note is not None and str(note).strip() and str(note).lower() != "nan":
             label = f"{label} — {str(note).strip()}"
 
+        if buffer_value > 0:
+            fig.add_hrect(
+                y0=zone_value - buffer_value,
+                y1=zone_value + buffer_value,
+                fillcolor="rgba(128, 128, 128, 0.10)",
+                line_width=0,
+                layer="below",
+            )
+
         fig.add_hline(
-            y=float(zone_value),
+            y=zone_value,
             line_width=1,
             line_dash="dot",
             annotation_text=label,
@@ -541,7 +555,7 @@ def add_manual_zone_lines(
 
     return fig
     
-def make_price_ema_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | None = None, show_zones: bool = False,) -> go.Figure:
+def make_price_ema_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | None = None, show_zones: bool = False, zone_buffer: float = 0.0,) -> go.Figure:
     plot_df = df.copy()
     plot_df["display_time"] = plot_df["open_time"].dt.tz_convert(DISPLAY_TZ)
 
@@ -591,10 +605,11 @@ def make_price_ema_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | Non
             )
         )
     fig = add_manual_zone_lines(
-        fig=fig,
-        chart_df=plot_df,
-        zones=zones,
-        show_zones=show_zones,
+    fig=fig,
+    chart_df=plot_df,
+    zones=zones,
+    show_zones=show_zones,
+    zone_buffer=zone_buffer,
     )
     fig.update_layout(
         title=title,
@@ -612,7 +627,7 @@ def make_price_ema_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | Non
     return fig
 
 
-def make_ichimoku_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | None = None, show_zones: bool = False,) -> go.Figure:
+def make_ichimoku_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | None = None, show_zones: bool = False,zone_buffer: float = 0.0,) -> go.Figure:
     plot_df = df.copy()
     plot_df["display_time"] = plot_df["open_time"].dt.tz_convert(DISPLAY_TZ)
 
@@ -732,11 +747,12 @@ def make_ichimoku_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | None
     add_cloud_segments(bearish_mask, "rgba(220, 0, 0, 0.18)", "Bearish Cloud")
 
     fig = add_manual_zone_lines(
-        fig=fig,
-        chart_df=plot_df,
-        zones=zones,
-        show_zones=show_zones,
-    )
+    fig=fig,
+    chart_df=plot_df,
+    zones=zones,
+    show_zones=show_zones,
+    zone_buffer=zone_buffer,
+)
     
     x_min = plot_df["display_time"].min()
     x_max = plot_df["display_time"].max() + pd.Timedelta(days=26)
@@ -766,18 +782,13 @@ st.title("Crypto Futures Strategy Dashboard")
 #selected_pair = st.selectbox("Crypto seç", PAIR_OPTIONS, index=0)
 pair_options = load_pair_options()
 selected_pair = st.selectbox("Crypto seç", pair_options, index=0)
-st.markdown("### Grafik ayarları")
-
-col1, col2, col3 = st.columns(3)
-
-with col1:
-    show_zones_1h = st.toggle("1H yakın zone çizgileri", value=True)
-
-with col2:
-    show_zones_15m = st.toggle("15M yakın zone çizgileri", value=True)
-
-with col3:
-    show_zones_1d = st.toggle("1D yakın zone çizgileri", value=False)
+zone_buffer = st.number_input(
+    "Manual zone buffer",
+    min_value=0.0,
+    value=300.0,
+    step=50.0,
+    help="Zone çizgisinin altına ve üstüne eklenecek sabit fiyat aralığı. 0 girilirse sadece zone çizgisi çizilir.",
+)
 
 snapshots = load_signal_snapshots(selected_pair)
 hourly = load_candles(selected_pair, "1h")
@@ -853,28 +864,43 @@ if not snapshots.empty:
     )
 
 st.subheader(f"{selected_pair} — 1H (son 2 gün)")
+show_zones_1h = st.toggle("1H yakın zone çizgileri", value=True, key="show_zones_1h")
+
 st.plotly_chart(
-    make_price_ema_chart(hourly_chart, f"{selected_pair} 1H — Price + EMA4/16/65/120",
+    make_price_ema_chart(
+        hourly_chart,
+        f"{selected_pair} 1H — Price + EMA4/16/65/120",
         zones=manual_zones,
         show_zones=show_zones_1h,
-                        ),
+        zone_buffer=zone_buffer,
+    ),
     use_container_width=True,
 )
 
 st.subheader(f"{selected_pair} — 15M (son 1 gün)")
+show_zones_15m = st.toggle("15M yakın zone çizgileri", value=True, key="show_zones_15m")
+
 st.plotly_chart(
-    make_price_ema_chart(m15_chart, f"{selected_pair} 15M — Price + EMA4/16/65/120",
+    make_price_ema_chart(
+        m15_chart,
+        f"{selected_pair} 15M — Price + EMA4/16/65/120",
         zones=manual_zones,
         show_zones=show_zones_15m,
-                        ),
+        zone_buffer=zone_buffer,
+    ),
     use_container_width=True,
 )
 
 st.subheader(f"{selected_pair} — 1D Ichimoku")
+show_zones_1d = st.toggle("1D yakın zone çizgileri", value=False, key="show_zones_1d")
+
 st.plotly_chart(
-    make_ichimoku_chart(daily_chart, f"{selected_pair} 1D — Ichimoku",
+    make_ichimoku_chart(
+        daily_chart,
+        f"{selected_pair} 1D — Ichimoku",
         zones=manual_zones,
         show_zones=show_zones_1d,
-                       ),
+        zone_buffer=zone_buffer,
+    ),
     use_container_width=True,
 )
