@@ -46,7 +46,9 @@ def _read_zones_csv(url: str) -> pd.DataFrame:
             response = requests.get(url, timeout=REMOTE_ZONE_LIST_TIMEOUT)
             response.raise_for_status()
 
-            df = pd.read_csv(StringIO(response.text))
+            response.encoding = "utf-8"
+            df = pd.read_csv(StringIO(response.text), encoding="utf-8")
+            
             log(f"Remote manual zone list loaded with {len(df)} raw rows")
             return df
 
