@@ -456,12 +456,20 @@ def add_hover_zone_context(
 ) -> pd.DataFrame:
     out = chart_df.copy()
 
-    out["hover_upper_zone"] = pd.NA
-    out["hover_lower_zone"] = pd.NA
-    out["hover_upper_zone_minus_buffer"] = pd.NA
-    out["hover_lower_zone_plus_buffer"] = pd.NA
+    hover_cols = [
+        "hover_upper_zone",
+        "hover_lower_zone",
+        "hover_upper_zone_minus_buffer",
+        "hover_lower_zone_plus_buffer",
+    ]
+
+    # Aynı kolonlar daha önce oluştuysa temizle.
+    # Böylece customdata tarafında duplicate kolon hatası oluşmaz.
+    out = out.drop(columns=[col for col in hover_cols if col in out.columns], errors="ignore")
 
     if zones is None or zones.empty or "close" not in out.columns:
+        for col in hover_cols:
+            out[col] = pd.NA
         return out
 
     work = zones.copy()
@@ -475,6 +483,8 @@ def add_hover_zone_context(
     )
 
     if not zone_values:
+        for col in hover_cols:
+            out[col] = pd.NA
         return out
 
     buffer_value = max(float(zone_buffer or 0), 0.0)
