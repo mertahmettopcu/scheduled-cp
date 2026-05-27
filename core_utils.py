@@ -16,7 +16,7 @@ from supabase import Client, create_client
 DISPLAY_TZ = "Europe/Istanbul"
 BINANCE_FUTURES_API = "https://fapi.binance.com"
 REQUEST_TIMEOUT = 30
-PAIR_LIST = ["BTCUSDT", "PAXGUSDT"]
+PAIR_LIST = ["BTCUSDT"]
 TIMEFRAME_LIMITS = {
     "15m": 1500,
     "1h": 1200,
