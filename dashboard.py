@@ -731,6 +731,13 @@ def make_ichimoku_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | None
     add_cloud_segments(bullish_mask, "rgba(0, 200, 0, 0.18)", "Bullish Cloud")
     add_cloud_segments(bearish_mask, "rgba(220, 0, 0, 0.18)", "Bearish Cloud")
 
+    fig = add_manual_zone_lines(
+        fig=fig,
+        chart_df=plot_df,
+        zones=zones,
+        show_zones=show_zones,
+    )
+    
     x_min = plot_df["display_time"].min()
     x_max = plot_df["display_time"].max() + pd.Timedelta(days=26)
 
