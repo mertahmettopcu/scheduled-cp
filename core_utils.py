@@ -120,6 +120,9 @@ def add_ema_rsi_features(df: pd.DataFrame) -> pd.DataFrame:
 
     for length in (4, 16, 65, 120, 168):
         out[f"ema{length}"] = out["close"].ewm(span=length, adjust=False).mean()
+        
+    for length in (4, 16, 65, 120, 168):
+        out[f"sma{length}"] = out["close"].rolling(length).mean()
 
     # Temporary EMA168 diagnostics.
     # Bunlar strateji sinyalini değiştirmez; sadece Binance ile hangi hesap eşleşiyor görmek için.
@@ -143,19 +146,21 @@ def add_ema_rsi_features(df: pd.DataFrame) -> pd.DataFrame:
     out["ema4_slope"] = out["ema4"].diff()
     out["ema16_slope"] = out["ema16"].diff()
 
-    prev_ema4 = out["ema4"].shift(1)
-    prev_ema16 = out["ema16"].shift(1)
+    prev_sma4 = out["sma4"].shift(1)
+    prev_sma16 = out["sma16"].shift(1)
+    
     out["long_signal"] = (
-        (out["ema4"] > out["ema16"]) &
-        (prev_ema4 <= prev_ema16) &
-        (out["rsi14"] > out["rsi52"])&
-        (out["rsi14"]>=50)
+        (out["sma4"] > out["sma16"]) &
+        (prev_sma4 <= prev_sma16) &
+        (out["rsi14"] > out["rsi52"]) &
+        (out["rsi14"] >= 50)
     )
+    
     out["short_signal"] = (
-        (out["ema4"] < out["ema16"]) &
-        (prev_ema4 >= prev_ema16) &
-        (out["rsi14"] < out["rsi52"])&
-        (out["rsi14"]<=50)
+        (out["sma4"] < out["sma16"]) &
+        (prev_sma4 >= prev_sma16) &
+        (out["rsi14"] < out["rsi52"]) &
+        (out["rsi14"] <= 50)
     )
     return out
 
@@ -183,15 +188,18 @@ def add_ichimoku(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def classify_ema_rsi_signal(row: pd.Series) -> str:
-    ema_bull = row["ema4"] > row["ema16"]
-    ema_bear = row["ema4"] < row["ema16"]
+    # Legacy function name; official pipeline signal now uses SMA4/SMA16.
+    sma_bull = row["sma4"] > row["sma16"]
+    sma_bear = row["sma4"] < row["sma16"]
     rsi_bull = row["rsi14"] > row["rsi52"]
     rsi_bear = row["rsi14"] < row["rsi52"]
 
-    if ema_bull and rsi_bull:
+    if sma_bull and rsi_bull and row["rsi14"] >= 50:
         return "LONG"
-    if ema_bear and rsi_bear:
+
+    if sma_bear and rsi_bear and row["rsi14"] <= 50:
         return "SHORT"
+
     return "NEUTRAL"
 
 
@@ -353,12 +361,12 @@ def build_telegram_message(
         "",
         f"15m: {signal_badge(signal_15m)}",
         f"Close: {fmt(row_15m['close'])}",
-        "EMA4 > EMA16" if row_15m["ema4"] > row_15m["ema16"] else "EMA4 < EMA16" if row_15m["ema4"] < row_15m["ema16"] else "EMA4 = EMA16",
+        "SMA4 > SMA16" if row_15m["sma4"] > row_15m["sma16"] else "SMA4 < SMA16" if row_15m["sma4"] < row_15m["sma16"] else "SMA4 = SMA16",
         "RSI14 > RSI52" if row_15m["rsi14"] > row_15m["rsi52"] else "RSI14 < RSI52" if row_15m["rsi14"] < row_15m["rsi52"] else "RSI14 = RSI52",
         "",
         f"1h: {signal_display(signal_1h, prev_signal_1h, triggered_1h)}",
         f"Close: {fmt(row_1h['close'])}",
-        "EMA4 > EMA16" if row_1h["ema4"] > row_1h["ema16"] else "EMA4 < EMA16" if row_1h["ema4"] < row_1h["ema16"] else "EMA4 = EMA16",
+        "SMA4 > SMA16" if row_1h["sma4"] > row_1h["sma16"] else "SMA4 < SMA16" if row_1h["sma4"] < row_1h["sma16"] else "SMA4 = SMA16",
         "RSI14 > RSI52" if row_1h["rsi14"] > row_1h["rsi52"] else "RSI14 < RSI52" if row_1h["rsi14"] < row_1h["rsi52"] else "RSI14 = RSI52",
         "",
         f"1d: {signal_display(signal_1d, prev_signal_1d, triggered_1d)}",
@@ -389,6 +397,8 @@ def latest_strategy_snapshot(pair: str, timeframe: str, df: pd.DataFrame) -> Dic
         "timeframe": timeframe,
         "last_open_time": last["open_time"].isoformat().replace("+00:00", "Z"),
         "close": _safe_float(last["close"]),
+        "sma4": _safe_float(last["sma4"]),
+        "sma16": _safe_float(last["sma16"]),
         "ema4": _safe_float(last["ema4"]),
         "ema16": _safe_float(last["ema16"]),
         "ema65": _safe_float(last["ema65"]),
@@ -618,7 +628,9 @@ def _build_app_link(pair: str, streamlit_app_url: str) -> str:
 
 def _signal_reason(last: pd.Series) -> str:
     if bool(last.get("long_signal", False)):
-        return "EMA4 crossed above EMA16 and RSI14 > RSI52"
+        return "SMA4 crossed above SMA16 and RSI14 > RSI52 and RSI14 >= 50"
+
     if bool(last.get("short_signal", False)):
-        return "EMA4 crossed below EMA16 and RSI14 < RSI52"
-    return "No fresh crossover signal"
+        return "SMA4 crossed below SMA16 and RSI14 < RSI52 and RSI14 <= 50"
+
+    return "No fresh SMA crossover signal"
