@@ -381,6 +381,9 @@ def add_ema_rsi(df: pd.DataFrame) -> pd.DataFrame:
     for length in (4, 16, 65, 120, 168):
         out[f"ema{length}"] = out["close"].ewm(span=length, adjust=False).mean()
 
+    for length in (4, 16, 65, 120, 168):
+        out[f"sma{length}"] = out["close"].rolling(length).mean()
+
     # Temporary debug columns for Binance comparison
     out["ema168_adjust_false"] = out["close"].ewm(span=168, adjust=False).mean()
     out["ema168_adjust_true"] = out["close"].ewm(span=168, adjust=True).mean()
@@ -402,19 +405,21 @@ def add_ema_rsi(df: pd.DataFrame) -> pd.DataFrame:
     out["ema4_slope"] = out["ema4"].diff()
     out["ema16_slope"] = out["ema16"].diff()
 
-    prev_ema4 = out["ema4"].shift(1)
-    prev_ema16 = out["ema16"].shift(1)
-
+    prev_sma4 = out["sma4"].shift(1)
+    prev_sma16 = out["sma16"].shift(1)
+    
     out["long_signal"] = (
-        (out["ema4"] > out["ema16"]) &
-        (prev_ema4 <= prev_ema16) &
-        (out["rsi14"] > out["rsi52"])
+        (out["sma4"] > out["sma16"]) &
+        (prev_sma4 <= prev_sma16) &
+        (out["rsi14"] > out["rsi52"]) &
+        (out["rsi14"] >= 50)
     )
-
+    
     out["short_signal"] = (
-        (out["ema4"] < out["ema16"]) &
-        (prev_ema4 >= prev_ema16) &
-        (out["rsi14"] < out["rsi52"])
+        (out["sma4"] < out["sma16"]) &
+        (prev_sma4 >= prev_sma16) &
+        (out["rsi14"] < out["rsi52"]) &
+        (out["rsi14"] <= 50)
     )
 
     return out
@@ -640,7 +645,7 @@ def add_manual_zone_lines(
 
     return fig
     
-def make_price_ema_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | None = None, show_zones: bool = False, zone_buffer: float = 0.0,) -> go.Figure:
+def make_price_ema_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | None = None, show_zones: bool = False, zone_buffer: float = 0.0,ma_display: str = "EMA",) -> go.Figure:
     plot_df = df.copy()
     plot_df["display_time"] = plot_df["open_time"].dt.tz_convert(DISPLAY_TZ)
     
@@ -702,15 +707,30 @@ def make_price_ema_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | Non
     )
 )
 
-    for length in (4, 16, 65, 120, 168):
-        fig.add_trace(
-            go.Scatter(
-                x=plot_df["display_time"],
-                y=plot_df[f"ema{length}"],
-                mode="lines",
-                name=f"EMA{length}",
+    ma_lengths = (4, 16, 65, 120, 168)
+
+    if ma_display in ("EMA", "EMA + SMA"):
+        for length in ma_lengths:
+            fig.add_trace(
+                go.Scatter(
+                    x=plot_df["display_time"],
+                    y=plot_df[f"ema{length}"],
+                    mode="lines",
+                    name=f"EMA{length}",
+                )
             )
-        )
+    
+    if ma_display in ("SMA", "EMA + SMA"):
+        for length in ma_lengths:
+            fig.add_trace(
+                go.Scatter(
+                    x=plot_df["display_time"],
+                    y=plot_df[f"sma{length}"],
+                    mode="lines",
+                    name=f"SMA{length}",
+                )
+            )
+            
     fig = add_manual_zone_lines(
     fig=fig,
     chart_df=plot_df,
@@ -930,6 +950,13 @@ zone_buffer = st.number_input(
     step=50.0,
     help="Zone çizgisinin altına ve üstüne eklenecek sabit fiyat aralığı. 0 girilirse sadece zone çizgisi çizilir.",
 )
+ma_display = st.radio(
+    "Grafikte gösterilecek hareketli ortalama",
+    ["EMA", "SMA", "EMA + SMA"],
+    index=1,
+    horizontal=True,
+    help="Bu seçim sadece grafikte çizilen ortalamaları değiştirir. Pipeline sinyali SMA4/SMA16 + RSI filtrelerine göre üretilir.",
+)
 
 snapshots = load_signal_snapshots(selected_pair)
 hourly = load_candles(selected_pair, "1h")
@@ -969,6 +996,8 @@ if not snapshots.empty:
         "timeframe",
         "last_open_time",
         "close",
+        "sma4",
+        "sma16",
         "ema4",
         "ema16",
         "ema65",
@@ -1014,6 +1043,7 @@ st.plotly_chart(
         zones=manual_zones,
         show_zones=show_zones_1h,
         zone_buffer=zone_buffer,
+        ma_display=ma_display,
     ),
     use_container_width=True,
 )
@@ -1028,6 +1058,7 @@ st.plotly_chart(
         zones=manual_zones,
         show_zones=show_zones_15m,
         zone_buffer=zone_buffer,
+        ma_display=ma_display,
     ),
     use_container_width=True,
 )
