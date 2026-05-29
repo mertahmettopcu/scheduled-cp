@@ -946,7 +946,7 @@ selected_pair = st.selectbox("Crypto seç", pair_options, index=0)
 zone_buffer = st.number_input(
     "Manual zone buffer",
     min_value=0.0,
-    value=300.0,
+    value=150.0,
     step=50.0,
     help="Zone çizgisinin altına ve üstüne eklenecek sabit fiyat aralığı. 0 girilirse sadece zone çizgisi çizilir.",
 )
