@@ -1120,7 +1120,7 @@ def add_signal_markers(
     if merged.empty:
         return fig
 
-    offset = _chart_price_offset(work, ratio=0.04)
+    offset = _chart_price_offset(work, ratio=0.07)
 
     long_markers = merged[merged["signal_type"] == "LONG"].copy()
     short_markers = merged[merged["signal_type"] == "SHORT"].copy()
