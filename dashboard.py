@@ -106,7 +106,14 @@ if params.get("ping") == st.secrets["access"]["keepalive_token"]:
 #PAIR_OPTIONS = ["BTCUSDT", "PAXGUSDT"]
 DISPLAY_TZ = "Europe/Istanbul"
 
-
+PLOTLY_CONFIG = {
+    "displaylogo": False,
+    "modeBarButtonsToRemove": [
+        "toImage",
+        "select2d",
+        "lasso2d",
+    ],
+}
 def _read_supabase_creds():
     url = None
     key = None
@@ -535,8 +542,6 @@ def add_momentum_highlights(
     threshold = max(float(momentum_threshold_pct or 0), 0.0) / 100.0
     offset = _chart_price_offset(work, ratio=0.018)
 
-    cm_rows = []
-
     for i, row in work.iterrows():
         upper_zone = row.get("hover_upper_zone")
         lower_zone = row.get("hover_lower_zone")
@@ -579,40 +584,6 @@ def add_momentum_highlights(
             fillcolor="rgba(180, 180, 180, 0.18)" if not is_counter else "rgba(255, 120, 120, 0.28)",
             line_width=0,
             layer="below",
-        )
-
-        if is_counter:
-            cm_rows.append(
-                {
-                    "display_time": display_time,
-                    "y": float(row["high"]) + offset,
-                    "momentum_ratio": momentum_ratio,
-                    "reference_signal": reference_signal,
-                    "candle_direction": candle_direction,
-                }
-            )
-
-    if cm_rows:
-        cm_df = pd.DataFrame(cm_rows)
-        fig.add_trace(
-            go.Scatter(
-                x=cm_df["display_time"],
-                y=cm_df["y"],
-                mode="markers+text",
-                marker=dict(symbol="x", size=11),
-                text=["CM"] * len(cm_df),
-                textposition="top center",
-                name="Counter Momentum",
-                customdata=cm_df[["reference_signal", "candle_direction", "momentum_ratio"]],
-                hovertemplate=(
-                    "Counter Momentum<br>"
-                    "Reference signal: %{customdata[0]}<br>"
-                    "Candle direction: %{customdata[1]}<br>"
-                    "Momentum ratio: %{customdata[2]:.2%}<br>"
-                    "Time: %{x}<br>"
-                    "<extra></extra>"
-                ),
-            )
         )
 
     return fig
@@ -1133,6 +1104,7 @@ def add_signal_markers(
                 mode="markers",
                 marker=dict(symbol="triangle-up", size=13, color="green"),
                 name=f"{name_prefix} LONG",
+                showlegend=False,
                 customdata=long_markers[["signal_type"]],
                 hovertemplate=(
                     f"{name_prefix}<br>"
@@ -1151,6 +1123,7 @@ def add_signal_markers(
                 mode="markers",
                 marker=dict(symbol="triangle-down", size=13, color="red"),
                 name=f"{name_prefix} SHORT",
+                showlegend=False,
                 customdata=short_markers[["signal_type"]],
                 hovertemplate=(
                     f"{name_prefix}<br>"
@@ -1279,7 +1252,7 @@ def make_price_ema_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | Non
         momentum_threshold_pct=momentum_threshold_pct,
     )
     fig.update_layout(
-        title=title,
+        title=None,
         xaxis_title="Time",
         yaxis_title="Price",
         xaxis_rangeslider_visible=False,
@@ -1466,7 +1439,7 @@ def make_ichimoku_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | None
     x_max = plot_df["display_time"].max() + pd.Timedelta(days=26)
 
     fig.update_layout(
-        title=title,
+        title=None,
         xaxis_title="Date",
         yaxis_title="Price",
         xaxis_rangeslider_visible=False,
@@ -1512,6 +1485,20 @@ momentum_threshold_pct = st.number_input(
     step=5.0,
     help="Momentum = abs(close - open) / zone mesafesi. Varsayılan %35. Buffer hesaba dahil edilmez.",
 )
+
+with st.expander("Gösterge açıklamaları"):
+    st.markdown(
+        """
+- **EMA/SMA çizgileri:** Seçili hareketli ortalama çizgileri. Plotly legend'da sadece bunlar gösterilir.
+- **Zone çizgisi:** Siyah kesikli yatay çizgi.
+- **Zone buffer:** Zone çizgisinin altındaki/üstündeki hafif gri yatay bant.
+- **Normal momentum:** Gri dikey gölge.
+- **Counter momentum:** Kırmızı/pembe dikey gölge.
+- **LONG sinyal:** Yeşil yukarı üçgen.
+- **SHORT sinyal:** Kırmızı aşağı üçgen.
+- **15M sinyal referansı:** 15M'in kendi sinyali değildir; 1H sinyalinin 15M içi referans noktasıdır.
+        """
+    )
 
 snapshots = load_signal_snapshots(selected_pair)
 hourly = load_candles(selected_pair, "1h")
