@@ -581,7 +581,7 @@ def add_momentum_highlights(
         fig.add_vrect(
             x0=display_time - half_delta,
             x1=display_time + half_delta,
-            fillcolor="rgba(180, 180, 180, 0.18)" if not is_counter else "rgba(255, 120, 120, 0.28)",
+            fillcolor="rgba(180, 215, 180, 0.18)" if not is_counter else "rgba(255, 120, 120, 0.28)",
             line_width=0,
             layer="below",
         )
@@ -1492,7 +1492,7 @@ with st.expander("Gösterge açıklamaları"):
 - **EMA/SMA çizgileri:** Seçili hareketli ortalama çizgileri. Plotly legend'da sadece bunlar gösterilir.
 - **Zone çizgisi:** Siyah kesikli yatay çizgi.
 - **Zone buffer:** Zone çizgisinin altındaki/üstündeki hafif gri yatay bant.
-- **Normal momentum:** Gri dikey gölge.
+- **Normal momentum:** Yeşil dikey gölge.
 - **Counter momentum:** Kırmızı/pembe dikey gölge.
 - **LONG sinyal:** Yeşil yukarı üçgen.
 - **SHORT sinyal:** Kırmızı aşağı üçgen.
