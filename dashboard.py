@@ -541,18 +541,16 @@ def add_momentum_highlights(
 
         display_time = row["display_time"]
 
-        if i + 1 < len(work):
-            next_time = work.iloc[i + 1]["display_time"]
+        if len(work) >= 2:
+            candle_delta = work["display_time"].sort_values().diff().dropna().median()
         else:
-            # Son mum için yaklaşık aralık
-            if len(work) >= 2:
-                next_time = display_time + (work.iloc[-1]["display_time"] - work.iloc[-2]["display_time"])
-            else:
-                next_time = display_time
-
+            candle_delta = pd.Timedelta(minutes=15)
+        
+        half_delta = candle_delta / 2
+        
         fig.add_vrect(
-            x0=display_time,
-            x1=next_time,
+            x0=display_time - half_delta,
+            x1=display_time + half_delta,
             fillcolor="rgba(180, 180, 180, 0.18)" if not is_counter else "rgba(255, 120, 120, 0.28)",
             line_width=0,
             layer="below",
@@ -593,6 +591,48 @@ def add_momentum_highlights(
         )
 
     return fig
+
+def all_signal_events(
+    df: pd.DataFrame,
+    long_col: str = "long_signal",
+    short_col: str = "short_signal",
+) -> pd.DataFrame:
+    if df.empty or "open_time" not in df.columns:
+        return pd.DataFrame(columns=["open_time", "signal_type"])
+
+    rows = []
+
+    if long_col in df.columns:
+        for _, row in df[df[long_col] == True].iterrows():
+            rows.append(
+                {
+                    "open_time": row["open_time"],
+                    "signal_type": "LONG",
+                }
+            )
+
+    if short_col in df.columns:
+        for _, row in df[df[short_col] == True].iterrows():
+            rows.append(
+                {
+                    "open_time": row["open_time"],
+                    "signal_type": "SHORT",
+                }
+            )
+
+    out = pd.DataFrame(rows)
+
+    if out.empty:
+        return pd.DataFrame(columns=["open_time", "signal_type"])
+
+    out["open_time"] = pd.to_datetime(out["open_time"], errors="coerce", utc=True)
+
+    return (
+        out
+        .dropna(subset=["open_time"])
+        .sort_values("open_time")
+        .reset_index(drop=True)
+    )
 
 # =========================================================
 # Loaders
@@ -1066,7 +1106,7 @@ def add_signal_markers(
                 x=long_markers["display_time"],
                 y=long_markers["low"] - offset,
                 mode="markers",
-                marker=dict(symbol="triangle-up", size=13),
+                marker=dict(symbol="triangle-up", size=13, color="green"),
                 name=f"{name_prefix} LONG",
                 customdata=long_markers[["signal_type"]],
                 hovertemplate=(
@@ -1084,7 +1124,7 @@ def add_signal_markers(
                 x=short_markers["display_time"],
                 y=short_markers["high"] + offset,
                 mode="markers",
-                marker=dict(symbol="triangle-down", size=13),
+                marker=dict(symbol="triangle-down", size=13, color="red"),
                 name=f"{name_prefix} SHORT",
                 customdata=short_markers[["signal_type"]],
                 hovertemplate=(
@@ -1102,7 +1142,8 @@ def make_price_ema_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | Non
     show_signal_markers: bool = False,
     signal_marker_name: str = "Signal",
     show_momentum: bool = False,
-    momentum_threshold_pct: float = 35.0,) -> go.Figure:
+    momentum_threshold_pct: float = 35.0,
+    momentum_reference_events: pd.DataFrame | None = None,) -> go.Figure:
         
     plot_df = df.copy()
     plot_df["display_time"] = plot_df["open_time"].dt.tz_convert(DISPLAY_TZ)
@@ -1208,7 +1249,7 @@ def make_price_ema_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | Non
         fig=fig,
         chart_df=plot_df,
         zones=zones,
-        marker_df=signal_markers if signal_markers is not None else pd.DataFrame(),
+        marker_df=momentum_reference_events if momentum_reference_events is not None else pd.DataFrame(),
         show_momentum=show_momentum,
         momentum_threshold_pct=momentum_threshold_pct,
     )
@@ -1474,6 +1515,7 @@ daily = add_ichimoku_signal_columns(daily)
 daily_chart = daily.tail(220).copy()
 
 hourly_signal_markers = latest_long_short_markers(hourly)
+hourly_signal_reference_events = all_signal_events(hourly)
 
 m15_intrabar_signal_markers = build_15m_intrabar_reference_markers(
     hourly_df=hourly,
@@ -1563,6 +1605,7 @@ st.plotly_chart(
         signal_marker_name="1H SMA Pipeline Signal",
         show_momentum=show_momentum_1h,
         momentum_threshold_pct=momentum_threshold_pct,
+        momentum_reference_events=hourly_signal_reference_events,
     ),
     use_container_width=True,
 )
