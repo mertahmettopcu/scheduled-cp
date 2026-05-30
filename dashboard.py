@@ -377,6 +377,7 @@ def _sma_signal_condition_for_temp_1h_close(
 def build_15m_intrabar_reference_markers(
     hourly_df: pd.DataFrame,
     m15_df: pd.DataFrame,
+    only_latest: bool = True,
 ) -> pd.DataFrame:
     if hourly_df.empty or m15_df.empty:
         return pd.DataFrame(columns=["open_time", "signal_type"])
@@ -448,7 +449,17 @@ def build_15m_intrabar_reference_markers(
     if out.empty:
         return pd.DataFrame(columns=["open_time", "signal_type"])
 
-    # Sadece son LONG + son SHORT gösterilecek.
+    out = (
+        out
+        .dropna(subset=["open_time"])
+        .sort_values("open_time")
+        .reset_index(drop=True)
+    )
+
+    if not only_latest:
+        return out
+
+    # Sadece grafikte gösterilecek son LONG + son SHORT marker.
     return latest_long_short_markers(
         out.assign(
             long_signal=out["signal_type"].eq("LONG"),
@@ -463,28 +474,41 @@ def add_signal_reference_state(
     marker_df: pd.DataFrame,
 ) -> pd.DataFrame:
     out = chart_df.copy()
-    out["reference_signal"] = pd.NA
+
+    # Eski/çakışan kolon varsa temizle.
+    # Aksi halde merge_asof reference_signal_x / reference_signal_y üretebilir.
+    out = out.drop(columns=["reference_signal"], errors="ignore")
 
     if marker_df is None or marker_df.empty:
+        out["reference_signal"] = pd.NA
         return out
 
     out["open_time"] = pd.to_datetime(out["open_time"], errors="coerce", utc=True)
+    out = out.dropna(subset=["open_time"]).sort_values("open_time").reset_index(drop=True)
 
     markers = marker_df.copy()
     markers["open_time"] = pd.to_datetime(markers["open_time"], errors="coerce", utc=True)
-    markers = markers.dropna(subset=["open_time"]).sort_values("open_time")
 
-    markers = markers.rename(columns={"signal_type": "reference_signal"})
+    markers = (
+        markers
+        .dropna(subset=["open_time"])
+        .sort_values("open_time")
+        .rename(columns={"signal_type": "reference_signal"})
+        .reset_index(drop=True)
+    )
+
+    if markers.empty:
+        out["reference_signal"] = pd.NA
+        return out
 
     merged = pd.merge_asof(
-        out.sort_values("open_time"),
-        markers[["open_time", "reference_signal"]].sort_values("open_time"),
+        out,
+        markers[["open_time", "reference_signal"]],
         on="open_time",
         direction="backward",
     )
 
-    return merged.sort_index()
-
+    return merged.sort_values("open_time").reset_index(drop=True)
 
 def add_momentum_highlights(
     fig: go.Figure,
@@ -532,7 +556,8 @@ def add_momentum_highlights(
             continue
 
         candle_direction = "LONG" if row["close"] > row["open"] else "SHORT" if row["close"] < row["open"] else "NEUTRAL"
-        reference_signal = str(row.get("reference_signal") or "").upper()
+        raw_reference_signal = row.get("reference_signal")
+        reference_signal = "" if pd.isna(raw_reference_signal) else str(raw_reference_signal).upper()
 
         is_counter = (
             (reference_signal == "LONG" and candle_direction == "SHORT") or
@@ -1095,7 +1120,7 @@ def add_signal_markers(
     if merged.empty:
         return fig
 
-    offset = _chart_price_offset(work)
+    offset = _chart_price_offset(work, ratio=0.04)
 
     long_markers = merged[merged["signal_type"] == "LONG"].copy()
     short_markers = merged[merged["signal_type"] == "SHORT"].copy()
@@ -1522,6 +1547,12 @@ m15_intrabar_signal_markers = build_15m_intrabar_reference_markers(
     m15_df=m15,
 )
 
+m15_intrabar_signal_reference_events = build_15m_intrabar_reference_markers(
+    hourly_df=hourly,
+    m15_df=m15,
+    only_latest=False,
+)
+
 daily_signal_markers = latest_long_short_markers(
     daily,
     long_col="ichimoku_long_signal",
@@ -1636,6 +1667,7 @@ st.plotly_chart(
         signal_marker_name="1H Signal Intrabar Reference",
         show_momentum=show_momentum_15m,
         momentum_threshold_pct=momentum_threshold_pct,
+        momentum_reference_events=m15_intrabar_signal_reference_events,
     ),
     use_container_width=True,
 )
