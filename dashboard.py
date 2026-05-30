@@ -260,6 +260,339 @@ def _safe_round(value, digits=4):
         return None
     return round(float(value), digits)
 
+def add_ichimoku_signal_columns(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy().sort_values("open_time").reset_index(drop=True)
+
+    signals = []
+
+    for i, row in out.iterrows():
+        if i < 26:
+            signals.append("NEUTRAL")
+            continue
+
+        ref = out.iloc[i - 26]
+
+        lag_above = row["close"] > ref["high"]
+        lag_below = row["close"] < ref["low"]
+
+        conv_gt_base = row["tenkan"] > row["kijun"]
+        conv_lt_base = row["tenkan"] < row["kijun"]
+
+        a = row.get("senkou_a")
+        b = row.get("senkou_b")
+        close_ = row["close"]
+
+        if pd.isna(a) or pd.isna(b):
+            signals.append("NEUTRAL")
+            continue
+
+        cloud_top = max(a, b)
+        cloud_bottom = min(a, b)
+
+        above_cloud = close_ > cloud_top
+        below_cloud = close_ < cloud_bottom
+
+        future_a = row.get("senkou_a_base")
+        future_b = row.get("senkou_b_base")
+
+        future_green = pd.notna(future_a) and pd.notna(future_b) and future_a > future_b
+        future_red = pd.notna(future_a) and pd.notna(future_b) and future_a < future_b
+
+        if lag_above and conv_gt_base and above_cloud and future_green:
+            signals.append("LONG")
+        elif lag_below and conv_lt_base and below_cloud and future_red:
+            signals.append("SHORT")
+        else:
+            signals.append("NEUTRAL")
+
+    out["ichimoku_signal"] = signals
+    prev_signal = out["ichimoku_signal"].shift(1).fillna("NEUTRAL")
+
+    out["ichimoku_long_signal"] = (
+        (out["ichimoku_signal"] == "LONG") &
+        (prev_signal != "LONG")
+    )
+
+    out["ichimoku_short_signal"] = (
+        (out["ichimoku_signal"] == "SHORT") &
+        (prev_signal != "SHORT")
+    )
+
+    return out
+
+def _rsi_from_close_series(close: pd.Series, period: int) -> pd.Series:
+    delta = close.diff()
+    gain = delta.clip(lower=0.0)
+    loss = -delta.clip(upper=0.0)
+
+    avg_gain = gain.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+    avg_loss = loss.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+
+    rs = avg_gain / avg_loss.replace(0, pd.NA)
+    return 100 - (100 / (1 + rs))
+
+
+def _sma_signal_condition_for_temp_1h_close(
+    hourly_df: pd.DataFrame,
+    hour_index: int,
+    temp_close: float,
+    signal_type: str,
+) -> bool:
+    if hour_index < 52:
+        return False
+
+    temp = hourly_df.iloc[: hour_index + 1].copy()
+    temp.loc[temp.index[-1], "close"] = float(temp_close)
+
+    close = pd.to_numeric(temp["close"], errors="coerce")
+
+    sma4 = close.rolling(4).mean()
+    sma16 = close.rolling(16).mean()
+
+    rsi14 = _rsi_from_close_series(close, 14)
+    rsi52 = _rsi_from_close_series(close, 52)
+
+    last = temp.index[-1]
+    prev = temp.index[-2]
+
+    if signal_type == "LONG":
+        return bool(
+            (sma4.loc[last] > sma16.loc[last]) and
+            (sma4.loc[prev] <= sma16.loc[prev]) and
+            (rsi14.loc[last] > rsi52.loc[last]) and
+            (rsi14.loc[last] >= 50)
+        )
+
+    if signal_type == "SHORT":
+        return bool(
+            (sma4.loc[last] < sma16.loc[last]) and
+            (sma4.loc[prev] >= sma16.loc[prev]) and
+            (rsi14.loc[last] < rsi52.loc[last]) and
+            (rsi14.loc[last] <= 50)
+        )
+
+    return False
+
+
+def build_15m_intrabar_reference_markers(
+    hourly_df: pd.DataFrame,
+    m15_df: pd.DataFrame,
+) -> pd.DataFrame:
+    if hourly_df.empty or m15_df.empty:
+        return pd.DataFrame(columns=["open_time", "signal_type"])
+
+    hourly_work = hourly_df.copy().sort_values("open_time").reset_index(drop=True)
+    m15_work = m15_df.copy().sort_values("open_time").reset_index(drop=True)
+
+    hourly_work["open_time"] = pd.to_datetime(hourly_work["open_time"], errors="coerce", utc=True)
+    m15_work["open_time"] = pd.to_datetime(m15_work["open_time"], errors="coerce", utc=True)
+
+    signal_rows = []
+
+    for hour_index, row in hourly_work.iterrows():
+        signal_type = None
+
+        if bool(row.get("long_signal", False)):
+            signal_type = "LONG"
+        elif bool(row.get("short_signal", False)):
+            signal_type = "SHORT"
+
+        if signal_type is None:
+            continue
+
+        hour_start = row["open_time"]
+        hour_end = hour_start + pd.Timedelta(hours=1)
+
+        inside_15m = m15_work[
+            (m15_work["open_time"] >= hour_start) &
+            (m15_work["open_time"] < hour_end)
+        ].copy()
+
+        # En güvenli kural:
+        # 1H sinyal mumunun içinde tam 4 adet 15M mum yoksa marker çizme.
+        if len(inside_15m) != 4:
+            continue
+
+        condition_values = []
+
+        for _, m15_row in inside_15m.iterrows():
+            condition_values.append(
+                _sma_signal_condition_for_temp_1h_close(
+                    hourly_df=hourly_work,
+                    hour_index=hour_index,
+                    temp_close=float(m15_row["close"]),
+                    signal_type=signal_type,
+                )
+            )
+
+        # Eğer son 15M kapanışında koşul true değilse, resmi 1H sinyalle uyumsuzdur.
+        # Bu durumda marker çizme.
+        if not condition_values or not condition_values[-1]:
+            continue
+
+        # Son TRUE serisinin başladığı 15M mumu bul.
+        start_pos = len(condition_values) - 1
+        while start_pos > 0 and condition_values[start_pos - 1]:
+            start_pos -= 1
+
+        marker_time = inside_15m.iloc[start_pos]["open_time"]
+
+        signal_rows.append(
+            {
+                "open_time": marker_time,
+                "signal_type": signal_type,
+            }
+        )
+
+    out = pd.DataFrame(signal_rows)
+    if out.empty:
+        return pd.DataFrame(columns=["open_time", "signal_type"])
+
+    # Sadece son LONG + son SHORT gösterilecek.
+    return latest_long_short_markers(
+        out.assign(
+            long_signal=out["signal_type"].eq("LONG"),
+            short_signal=out["signal_type"].eq("SHORT"),
+        ),
+        long_col="long_signal",
+        short_col="short_signal",
+    )
+
+def add_signal_reference_state(
+    chart_df: pd.DataFrame,
+    marker_df: pd.DataFrame,
+) -> pd.DataFrame:
+    out = chart_df.copy()
+    out["reference_signal"] = pd.NA
+
+    if marker_df is None or marker_df.empty:
+        return out
+
+    out["open_time"] = pd.to_datetime(out["open_time"], errors="coerce", utc=True)
+
+    markers = marker_df.copy()
+    markers["open_time"] = pd.to_datetime(markers["open_time"], errors="coerce", utc=True)
+    markers = markers.dropna(subset=["open_time"]).sort_values("open_time")
+
+    markers = markers.rename(columns={"signal_type": "reference_signal"})
+
+    merged = pd.merge_asof(
+        out.sort_values("open_time"),
+        markers[["open_time", "reference_signal"]].sort_values("open_time"),
+        on="open_time",
+        direction="backward",
+    )
+
+    return merged.sort_index()
+
+
+def add_momentum_highlights(
+    fig: go.Figure,
+    chart_df: pd.DataFrame,
+    zones: pd.DataFrame,
+    marker_df: pd.DataFrame,
+    show_momentum: bool,
+    momentum_threshold_pct: float = 35.0,
+) -> go.Figure:
+    if not show_momentum or chart_df.empty or zones is None or zones.empty:
+        return fig
+
+    work = add_hover_zone_context(
+        chart_df=chart_df,
+        zones=zones,
+        zone_buffer=0.0,
+    )
+
+    work = add_signal_reference_state(work, marker_df)
+
+    if work.empty:
+        return fig
+
+    threshold = max(float(momentum_threshold_pct or 0), 0.0) / 100.0
+    offset = _chart_price_offset(work, ratio=0.018)
+
+    cm_rows = []
+
+    for i, row in work.iterrows():
+        upper_zone = row.get("hover_upper_zone")
+        lower_zone = row.get("hover_lower_zone")
+
+        if pd.isna(upper_zone) or pd.isna(lower_zone):
+            continue
+
+        zone_distance = float(upper_zone) - float(lower_zone)
+
+        if zone_distance <= 0:
+            continue
+
+        body_size = abs(float(row["close"]) - float(row["open"]))
+        momentum_ratio = body_size / zone_distance
+
+        if momentum_ratio < threshold:
+            continue
+
+        candle_direction = "LONG" if row["close"] > row["open"] else "SHORT" if row["close"] < row["open"] else "NEUTRAL"
+        reference_signal = str(row.get("reference_signal") or "").upper()
+
+        is_counter = (
+            (reference_signal == "LONG" and candle_direction == "SHORT") or
+            (reference_signal == "SHORT" and candle_direction == "LONG")
+        )
+
+        display_time = row["display_time"]
+
+        if i + 1 < len(work):
+            next_time = work.iloc[i + 1]["display_time"]
+        else:
+            # Son mum için yaklaşık aralık
+            if len(work) >= 2:
+                next_time = display_time + (work.iloc[-1]["display_time"] - work.iloc[-2]["display_time"])
+            else:
+                next_time = display_time
+
+        fig.add_vrect(
+            x0=display_time,
+            x1=next_time,
+            fillcolor="rgba(180, 180, 180, 0.18)" if not is_counter else "rgba(255, 120, 120, 0.28)",
+            line_width=0,
+            layer="below",
+        )
+
+        if is_counter:
+            cm_rows.append(
+                {
+                    "display_time": display_time,
+                    "y": float(row["high"]) + offset,
+                    "momentum_ratio": momentum_ratio,
+                    "reference_signal": reference_signal,
+                    "candle_direction": candle_direction,
+                }
+            )
+
+    if cm_rows:
+        cm_df = pd.DataFrame(cm_rows)
+        fig.add_trace(
+            go.Scatter(
+                x=cm_df["display_time"],
+                y=cm_df["y"],
+                mode="markers+text",
+                marker=dict(symbol="x", size=11),
+                text=["CM"] * len(cm_df),
+                textposition="top center",
+                name="Counter Momentum",
+                customdata=cm_df[["reference_signal", "candle_direction", "momentum_ratio"]],
+                hovertemplate=(
+                    "Counter Momentum<br>"
+                    "Reference signal: %{customdata[0]}<br>"
+                    "Candle direction: %{customdata[1]}<br>"
+                    "Momentum ratio: %{customdata[2]:.2%}<br>"
+                    "Time: %{x}<br>"
+                    "<extra></extra>"
+                ),
+            )
+        )
+
+    return fig
 
 # =========================================================
 # Loaders
@@ -644,8 +977,133 @@ def add_manual_zone_lines(
         )
 
     return fig
+
+def _chart_price_offset(chart_df: pd.DataFrame, ratio: float = 0.012) -> float:
+    if chart_df.empty or "high" not in chart_df.columns or "low" not in chart_df.columns:
+        return 0.0
+
+    visible_high = pd.to_numeric(chart_df["high"], errors="coerce").max()
+    visible_low = pd.to_numeric(chart_df["low"], errors="coerce").min()
+
+    if pd.isna(visible_high) or pd.isna(visible_low):
+        return 0.0
+
+    return float(visible_high - visible_low) * ratio
+
+
+def latest_long_short_markers(
+    df: pd.DataFrame,
+    long_col: str = "long_signal",
+    short_col: str = "short_signal",
+) -> pd.DataFrame:
+    if df.empty or "open_time" not in df.columns:
+        return pd.DataFrame(columns=["open_time", "signal_type"])
+
+    rows = []
+
+    if long_col in df.columns:
+        long_rows = df[df[long_col] == True]
+        if not long_rows.empty:
+            last_long = long_rows.iloc[-1]
+            rows.append(
+                {
+                    "open_time": last_long["open_time"],
+                    "signal_type": "LONG",
+                }
+            )
+
+    if short_col in df.columns:
+        short_rows = df[df[short_col] == True]
+        if not short_rows.empty:
+            last_short = short_rows.iloc[-1]
+            rows.append(
+                {
+                    "open_time": last_short["open_time"],
+                    "signal_type": "SHORT",
+                }
+            )
+
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return pd.DataFrame(columns=["open_time", "signal_type"])
+
+    out["open_time"] = pd.to_datetime(out["open_time"], errors="coerce", utc=True)
+    return out.dropna(subset=["open_time"]).sort_values("open_time").reset_index(drop=True)
+
+
+def add_signal_markers(
+    fig: go.Figure,
+    chart_df: pd.DataFrame,
+    marker_df: pd.DataFrame,
+    name_prefix: str,
+) -> go.Figure:
+    if chart_df.empty or marker_df is None or marker_df.empty:
+        return fig
+
+    work = chart_df.copy()
+    work["open_time"] = pd.to_datetime(work["open_time"], errors="coerce", utc=True)
+
+    markers = marker_df.copy()
+    markers["open_time"] = pd.to_datetime(markers["open_time"], errors="coerce", utc=True)
+
+    merged = markers.merge(
+        work[["open_time", "display_time", "high", "low"]],
+        on="open_time",
+        how="inner",
+    )
+
+    if merged.empty:
+        return fig
+
+    offset = _chart_price_offset(work)
+
+    long_markers = merged[merged["signal_type"] == "LONG"].copy()
+    short_markers = merged[merged["signal_type"] == "SHORT"].copy()
+
+    if not long_markers.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=long_markers["display_time"],
+                y=long_markers["low"] - offset,
+                mode="markers",
+                marker=dict(symbol="triangle-up", size=13),
+                name=f"{name_prefix} LONG",
+                customdata=long_markers[["signal_type"]],
+                hovertemplate=(
+                    f"{name_prefix}<br>"
+                    "Signal: %{customdata[0]}<br>"
+                    "Time: %{x}<br>"
+                    "<extra></extra>"
+                ),
+            )
+        )
+
+    if not short_markers.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=short_markers["display_time"],
+                y=short_markers["high"] + offset,
+                mode="markers",
+                marker=dict(symbol="triangle-down", size=13),
+                name=f"{name_prefix} SHORT",
+                customdata=short_markers[["signal_type"]],
+                hovertemplate=(
+                    f"{name_prefix}<br>"
+                    "Signal: %{customdata[0]}<br>"
+                    "Time: %{x}<br>"
+                    "<extra></extra>"
+                ),
+            )
+        )
+
+    return fig
     
-def make_price_ema_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | None = None, show_zones: bool = False, zone_buffer: float = 0.0,ma_display: str = "EMA",) -> go.Figure:
+def make_price_ema_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | None = None, show_zones: bool = False, zone_buffer: float = 0.0,ma_display: str = "EMA",signal_markers: pd.DataFrame | None = None,
+    show_signal_markers: bool = False,
+    signal_marker_name: str = "Signal",
+    show_momentum: bool = False,
+    momentum_threshold_pct: float = 35.0,) -> go.Figure:
+        
     plot_df = df.copy()
     plot_df["display_time"] = plot_df["open_time"].dt.tz_convert(DISPLAY_TZ)
     
@@ -738,6 +1196,22 @@ def make_price_ema_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | Non
     show_zones=show_zones,
     zone_buffer=zone_buffer,
     )
+    if show_signal_markers and signal_markers is not None and not signal_markers.empty:
+        fig = add_signal_markers(
+            fig=fig,
+            chart_df=plot_df,
+            marker_df=signal_markers,
+            name_prefix=signal_marker_name,
+        )
+
+    fig = add_momentum_highlights(
+        fig=fig,
+        chart_df=plot_df,
+        zones=zones,
+        marker_df=signal_markers if signal_markers is not None else pd.DataFrame(),
+        show_momentum=show_momentum,
+        momentum_threshold_pct=momentum_threshold_pct,
+    )
     fig.update_layout(
         title=title,
         xaxis_title="Time",
@@ -754,7 +1228,7 @@ def make_price_ema_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | Non
     return fig
 
 
-def make_ichimoku_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | None = None, show_zones: bool = False,zone_buffer: float = 0.0,) -> go.Figure:
+def make_ichimoku_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | None = None, show_zones: bool = False,zone_buffer: float = 0.0, signal_markers: pd.DataFrame | None = None, show_signal_markers: bool = False,) -> go.Figure:
     plot_df = df.copy()
     plot_df["display_time"] = plot_df["open_time"].dt.tz_convert(DISPLAY_TZ)
     
@@ -914,7 +1388,14 @@ def make_ichimoku_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | None
     show_zones=show_zones,
     zone_buffer=zone_buffer,
 )
-    
+    if show_signal_markers and signal_markers is not None and not signal_markers.empty:
+        fig = add_signal_markers(
+            fig=fig,
+            chart_df=plot_df,
+            marker_df=signal_markers,
+            name_prefix="1D Ichimoku Signal",
+        )
+        
     x_min = plot_df["display_time"].min()
     x_max = plot_df["display_time"].max() + pd.Timedelta(days=26)
 
@@ -957,6 +1438,14 @@ ma_display = st.radio(
     horizontal=True,
     help="Bu seçim sadece grafikte çizilen ortalamaları değiştirir. Pipeline sinyali SMA4/SMA16 + RSI filtrelerine göre üretilir.",
 )
+momentum_threshold_pct = st.number_input(
+    "Momentum threshold (%)",
+    min_value=0.0,
+    max_value=100.0,
+    value=35.0,
+    step=5.0,
+    help="Momentum = abs(close - open) / zone mesafesi. Varsayılan %35. Buffer hesaba dahil edilmez.",
+)
 
 snapshots = load_signal_snapshots(selected_pair)
 hourly = load_candles(selected_pair, "1h")
@@ -979,8 +1468,23 @@ daily = add_ichimoku(daily)
 
 hourly_chart = hourly.tail(48).copy()
 m15_chart = m15.tail(96).copy()
+#daily_chart = daily.tail(220).copy()
+
+daily = add_ichimoku_signal_columns(daily)
 daily_chart = daily.tail(220).copy()
 
+hourly_signal_markers = latest_long_short_markers(hourly)
+
+m15_intrabar_signal_markers = build_15m_intrabar_reference_markers(
+    hourly_df=hourly,
+    m15_df=m15,
+)
+
+daily_signal_markers = latest_long_short_markers(
+    daily,
+    long_col="ichimoku_long_signal",
+    short_col="ichimoku_short_signal",
+)
 
 if not snapshots.empty:
     st.subheader("Latest signal snapshot")
@@ -1034,37 +1538,74 @@ if not snapshots.empty:
     )
 
 st.subheader(f"{selected_pair} — 1H (son 2 gün)")
-show_zones_1h = st.toggle("1H yakın zone çizgileri", value=True, key="show_zones_1h")
+
+col_1h_a, col_1h_b, col_1h_c = st.columns(3)
+
+with col_1h_a:
+    show_zones_1h = st.toggle("1H yakın zone çizgileri", value=True, key="show_zones_1h")
+
+with col_1h_b:
+    show_signal_markers_1h = st.toggle("1H sinyal markerları", value=True, key="show_signal_markers_1h")
+
+with col_1h_c:
+    show_momentum_1h = st.toggle("1H momentum mumları", value=True, key="show_momentum_1h")
 
 st.plotly_chart(
     make_price_ema_chart(
         hourly_chart,
-        f"{selected_pair} 1H — Price + EMA4/16/65/120",
+        f"{selected_pair} 1H — Price + Moving Averages",
         zones=manual_zones,
         show_zones=show_zones_1h,
         zone_buffer=zone_buffer,
         ma_display=ma_display,
+        signal_markers=hourly_signal_markers,
+        show_signal_markers=show_signal_markers_1h,
+        signal_marker_name="1H SMA Pipeline Signal",
+        show_momentum=show_momentum_1h,
+        momentum_threshold_pct=momentum_threshold_pct,
     ),
     use_container_width=True,
 )
 
 st.subheader(f"{selected_pair} — 15M (son 1 gün)")
-show_zones_15m = st.toggle("15M yakın zone çizgileri", value=True, key="show_zones_15m")
+
+col_15m_a, col_15m_b, col_15m_c = st.columns(3)
+
+with col_15m_a:
+    show_zones_15m = st.toggle("15M yakın zone çizgileri", value=True, key="show_zones_15m")
+
+with col_15m_b:
+    show_signal_markers_15m = st.toggle("15M 1H sinyal referansı", value=True, key="show_signal_markers_15m")
+
+with col_15m_c:
+    show_momentum_15m = st.toggle("15M momentum mumları", value=True, key="show_momentum_15m")
 
 st.plotly_chart(
     make_price_ema_chart(
         m15_chart,
-        f"{selected_pair} 15M — Price + EMA4/16/65/120",
+        f"{selected_pair} 15M — Price + Moving Averages",
         zones=manual_zones,
         show_zones=show_zones_15m,
         zone_buffer=zone_buffer,
         ma_display=ma_display,
+        signal_markers=m15_intrabar_signal_markers,
+        show_signal_markers=show_signal_markers_15m,
+        signal_marker_name="1H Signal Intrabar Reference",
+        show_momentum=show_momentum_15m,
+        momentum_threshold_pct=momentum_threshold_pct,
     ),
     use_container_width=True,
 )
 
 st.subheader(f"{selected_pair} — 1D Ichimoku")
-show_zones_1d = st.toggle("1D yakın zone çizgileri", value=False, key="show_zones_1d")
+
+col_1d_a, col_1d_b = st.columns(2)
+
+with col_1d_a:
+    show_zones_1d = st.toggle("1D yakın zone çizgileri", value=False, key="show_zones_1d")
+
+with col_1d_b:
+    show_signal_markers_1d = st.toggle("1D Ichimoku sinyal markerları", value=True, key="show_signal_markers_1d")
 
 st.plotly_chart(
     make_ichimoku_chart(
@@ -1073,6 +1614,8 @@ st.plotly_chart(
         zones=manual_zones,
         show_zones=show_zones_1d,
         zone_buffer=zone_buffer,
+        signal_markers=daily_signal_markers,
+        show_signal_markers=show_signal_markers_1d,
     ),
     use_container_width=True,
 )
