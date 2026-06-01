@@ -1259,7 +1259,7 @@ def make_price_ema_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | Non
         momentum_threshold_pct=momentum_threshold_pct,
     )
     fig.update_layout(
-        title=None,
+        title="",
         xaxis_title="Time",
         yaxis_title="Price",
         xaxis_rangeslider_visible=False,
@@ -1452,7 +1452,7 @@ def make_ichimoku_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | None
     x_max = plot_df["display_time"].max() + pd.Timedelta(days=26)
 
     fig.update_layout(
-        title=None,
+        title="",
         xaxis_title="Date",
         yaxis_title="Price",
         xaxis_rangeslider_visible=False,
