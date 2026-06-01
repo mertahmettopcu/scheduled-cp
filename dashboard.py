@@ -1472,8 +1472,14 @@ def make_ichimoku_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | None
 # UI
 # =========================================================
 st.title("Crypto Futures Strategy Dashboard")
-st_autorefresh(interval=300000, key="dashboard_autorefresh")
-st.caption("Dashboard otomatik olarak her 5 dakikada bir yenilenir.")
+refresh_count = st_autorefresh(
+    interval=300000,
+    key="dashboard_autorefresh",
+)
+
+st.caption(
+    f"Dashboard otomatik yenilenir: 5 dk | Son yenileme: {pd.Timestamp.now(tz=DISPLAY_TZ).strftime('%Y-%m-%d %H:%M:%S')} | Refresh: {refresh_count}"
+)
 #st.caption("Perpetual futures candles come from Supabase cache populated by your GitHub pipeline.")
 
 #selected_pair = st.selectbox("Crypto seç", PAIR_OPTIONS, index=0)
