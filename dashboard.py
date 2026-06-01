@@ -4,6 +4,7 @@ import re
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh
 from supabase import create_client
 
 st.set_page_config(page_title="Crypto Futures Dashboard", layout="wide")
@@ -1471,6 +1472,8 @@ def make_ichimoku_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | None
 # UI
 # =========================================================
 st.title("Crypto Futures Strategy Dashboard")
+st_autorefresh(interval=300000, key="dashboard_autorefresh")
+st.caption("Dashboard otomatik olarak her 5 dakikada bir yenilenir.")
 #st.caption("Perpetual futures candles come from Supabase cache populated by your GitHub pipeline.")
 
 #selected_pair = st.selectbox("Crypto seç", PAIR_OPTIONS, index=0)
