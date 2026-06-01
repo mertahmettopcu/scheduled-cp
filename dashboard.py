@@ -581,7 +581,7 @@ def add_momentum_highlights(
         fig.add_vrect(
             x0=display_time - half_delta,
             x1=display_time + half_delta,
-            fillcolor="rgba(142, 210, 174, 0.3)" if not is_counter else "rgba(255, 120, 120, 0.28)",
+            fillcolor="rgba(142, 210, 174, 0.28)" if not is_counter else "rgba(255, 120, 120, 0.28)",
             line_width=0,
             layer="below",
         )
