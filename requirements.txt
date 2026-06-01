@@ -3,6 +3,7 @@ pandas
 supabase
 python-dotenv
 streamlit>=1.36
+streamlit-autorefresh
 pytz
 numpy
 python-binance
