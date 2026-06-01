@@ -1529,15 +1529,14 @@ daily_chart = daily.tail(220).copy()
 hourly_signal_reference_events = all_signal_events(hourly)
 hourly_signal_markers = hourly_signal_reference_events[hourly_signal_reference_events["open_time"].isin(hourly_chart["open_time"])].copy()
 
-m15_intrabar_signal_markers = m15_intrabar_signal_reference_events[
-    m15_intrabar_signal_reference_events["open_time"].isin(m15_chart["open_time"])
-].copy()
-
 m15_intrabar_signal_reference_events = build_15m_intrabar_reference_markers(
     hourly_df=hourly,
     m15_df=m15,
     only_latest=False,
 )
+m15_intrabar_signal_markers = m15_intrabar_signal_reference_events[
+    m15_intrabar_signal_reference_events["open_time"].isin(m15_chart["open_time"])
+].copy()
 
 daily_signal_reference_events = all_signal_events(
     daily,
