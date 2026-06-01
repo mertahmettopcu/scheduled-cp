@@ -1526,13 +1526,12 @@ m15_chart = m15.tail(96).copy()
 daily = add_ichimoku_signal_columns(daily)
 daily_chart = daily.tail(220).copy()
 
-hourly_signal_markers = latest_long_short_markers(hourly)
 hourly_signal_reference_events = all_signal_events(hourly)
+hourly_signal_markers = hourly_signal_reference_events[hourly_signal_reference_events["open_time"].isin(hourly_chart["open_time"])].copy()
 
-m15_intrabar_signal_markers = build_15m_intrabar_reference_markers(
-    hourly_df=hourly,
-    m15_df=m15,
-)
+m15_intrabar_signal_markers = m15_intrabar_signal_reference_events[
+    m15_intrabar_signal_reference_events["open_time"].isin(m15_chart["open_time"])
+].copy()
 
 m15_intrabar_signal_reference_events = build_15m_intrabar_reference_markers(
     hourly_df=hourly,
@@ -1540,11 +1539,15 @@ m15_intrabar_signal_reference_events = build_15m_intrabar_reference_markers(
     only_latest=False,
 )
 
-daily_signal_markers = latest_long_short_markers(
+daily_signal_reference_events = all_signal_events(
     daily,
     long_col="ichimoku_long_signal",
     short_col="ichimoku_short_signal",
 )
+
+daily_signal_markers = daily_signal_reference_events[
+    daily_signal_reference_events["open_time"].isin(daily_chart["open_time"])
+].copy()
 
 if not snapshots.empty:
     st.subheader("Latest signal snapshot")
