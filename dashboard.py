@@ -114,6 +114,8 @@ PLOTLY_CONFIG = {
         "lasso2d",
     ],
 }
+
+
 def _read_supabase_creds():
     url = None
     key = None
@@ -360,12 +362,10 @@ def _sma_signal_condition_for_temp_1h_close(
     rsi52 = _rsi_from_close_series(close, 52)
 
     last = temp.index[-1]
-    prev = temp.index[-2]
 
     if signal_type == "LONG":
         return bool(
             (sma4.loc[last] > sma16.loc[last]) and
-            (sma4.loc[prev] <= sma16.loc[prev]) and
             (rsi14.loc[last] > rsi52.loc[last]) and
             (rsi14.loc[last] >= 50)
         )
@@ -373,7 +373,6 @@ def _sma_signal_condition_for_temp_1h_close(
     if signal_type == "SHORT":
         return bool(
             (sma4.loc[last] < sma16.loc[last]) and
-            (sma4.loc[prev] >= sma16.loc[prev]) and
             (rsi14.loc[last] < rsi52.loc[last]) and
             (rsi14.loc[last] <= 50)
         )
@@ -517,6 +516,7 @@ def add_signal_reference_state(
 
     return merged.sort_values("open_time").reset_index(drop=True)
 
+
 def add_momentum_highlights(
     fig: go.Figure,
     chart_df: pd.DataFrame,
@@ -581,10 +581,12 @@ def add_momentum_highlights(
         fig.add_vrect(
             x0=display_time - half_delta,
             x1=display_time + half_delta,
-            fillcolor="rgba(170, 215, 195, 0.30)" if not is_counter else "rgba(255, 120, 120, 0.28)",
+            fillcolor="rgba(180, 180, 180, 0.18)" if not is_counter else "rgba(255, 120, 120, 0.28)",
             line_width=0,
             layer="below",
         )
+
+
 
     return fig
 
@@ -774,21 +776,25 @@ def add_ema_rsi(df: pd.DataFrame) -> pd.DataFrame:
     out["ema4_slope"] = out["ema4"].diff()
     out["ema16_slope"] = out["ema16"].diff()
 
-    prev_sma4 = out["sma4"].shift(1)
-    prev_sma16 = out["sma16"].shift(1)
-    
+    sma_bull = out["sma4"] > out["sma16"]
+    sma_bear = out["sma4"] < out["sma16"]
+    rsi_bull = (out["rsi14"] > out["rsi52"]) & (out["rsi14"] >= 50)
+    rsi_bear = (out["rsi14"] < out["rsi52"]) & (out["rsi14"] <= 50)
+
+    out["sma_rsi_signal"] = "NEUTRAL"
+    out.loc[sma_bull & rsi_bull, "sma_rsi_signal"] = "LONG"
+    out.loc[sma_bear & rsi_bear, "sma_rsi_signal"] = "SHORT"
+
+    prev_signal = out["sma_rsi_signal"].shift(1).fillna("NEUTRAL")
+
     out["long_signal"] = (
-        (out["sma4"] > out["sma16"]) &
-        (prev_sma4 <= prev_sma16) &
-        (out["rsi14"] > out["rsi52"]) &
-        (out["rsi14"] >= 50)
+        (out["sma_rsi_signal"] == "LONG") &
+        (prev_signal != "LONG")
     )
-    
+
     out["short_signal"] = (
-        (out["sma4"] < out["sma16"]) &
-        (prev_sma4 >= prev_sma16) &
-        (out["rsi14"] < out["rsi52"]) &
-        (out["rsi14"] <= 50)
+        (out["sma_rsi_signal"] == "SHORT") &
+        (prev_signal != "SHORT")
     )
 
     return out
@@ -1091,7 +1097,7 @@ def add_signal_markers(
     if merged.empty:
         return fig
 
-    offset = _chart_price_offset(work, ratio=0.1)
+    offset = _chart_price_offset(work, ratio=0.04)
 
     long_markers = merged[merged["signal_type"] == "LONG"].copy()
     short_markers = merged[merged["signal_type"] == "SHORT"].copy()
@@ -1168,6 +1174,7 @@ def make_price_ema_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | Non
         low=plot_df["low"],
         close=plot_df["close"],
         name="Price",
+        showlegend=False,
         customdata=plot_df[
             [
                 "ema168",
@@ -1252,7 +1259,7 @@ def make_price_ema_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | Non
         momentum_threshold_pct=momentum_threshold_pct,
     )
     fig.update_layout(
-        title="",
+        title=None,
         xaxis_title="Time",
         yaxis_title="Price",
         xaxis_rangeslider_visible=False,
@@ -1309,6 +1316,7 @@ def make_ichimoku_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | None
                     low=plot_df["low"],
                     close=plot_df["close"],
                     name="Price",
+                    showlegend=False,
                     customdata=plot_df[
                         [
                             "hover_upper_zone",
@@ -1341,6 +1349,7 @@ def make_ichimoku_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | None
             y=plot_df["tenkan"],
             mode="lines",
             name="Tenkan",
+            showlegend=False,
         )
     )
     fig.add_trace(
@@ -1349,6 +1358,7 @@ def make_ichimoku_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | None
             y=plot_df["kijun"],
             mode="lines",
             name="Kijun",
+            showlegend=False,
         )
     )
     fig.add_trace(
@@ -1357,6 +1367,7 @@ def make_ichimoku_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | None
             y=plot_df["chikou"],
             mode="lines",
             name="Chikou",
+            showlegend=False,
         )
     )
 
@@ -1367,6 +1378,7 @@ def make_ichimoku_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | None
             y=cloud_df["senkou_a"],
             mode="lines",
             name="Senkou A",
+            showlegend=False,
             line=dict(width=2),
         )
     )
@@ -1376,6 +1388,7 @@ def make_ichimoku_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | None
             y=cloud_df["senkou_b"],
             mode="lines",
             name="Senkou B",
+            showlegend=False,
             line=dict(width=2),
         )
     )
@@ -1408,7 +1421,7 @@ def make_ichimoku_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | None
                     fill="tonexty",
                     fillcolor=fillcolor,
                     name=name if first_segment else None,
-                    showlegend=first_segment,
+                    showlegend=False,
                     hoverinfo="skip",
                 )
             )
@@ -1439,7 +1452,7 @@ def make_ichimoku_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | None
     x_max = plot_df["display_time"].max() + pd.Timedelta(days=26)
 
     fig.update_layout(
-        title="",
+        title=None,
         xaxis_title="Date",
         yaxis_title="Price",
         xaxis_rangeslider_visible=False,
@@ -1492,7 +1505,7 @@ with st.expander("Gösterge açıklamaları"):
 - **EMA/SMA çizgileri:** Seçili hareketli ortalama çizgileri. Plotly legend'da sadece bunlar gösterilir.
 - **Zone çizgisi:** Siyah kesikli yatay çizgi.
 - **Zone buffer:** Zone çizgisinin altındaki/üstündeki hafif gri yatay bant.
-- **Normal momentum:** Yeşil dikey gölge.
+- **Normal momentum:** Gri dikey gölge.
 - **Counter momentum:** Kırmızı/pembe dikey gölge.
 - **LONG sinyal:** Yeşil yukarı üçgen.
 - **SHORT sinyal:** Kırmızı aşağı üçgen.
@@ -1527,7 +1540,9 @@ daily = add_ichimoku_signal_columns(daily)
 daily_chart = daily.tail(220).copy()
 
 hourly_signal_reference_events = all_signal_events(hourly)
-hourly_signal_markers = hourly_signal_reference_events[hourly_signal_reference_events["open_time"].isin(hourly_chart["open_time"])].copy()
+hourly_signal_markers = hourly_signal_reference_events[
+    hourly_signal_reference_events["open_time"].isin(hourly_chart["open_time"])
+].copy()
 
 m15_intrabar_signal_reference_events = build_15m_intrabar_reference_markers(
     hourly_df=hourly,
@@ -1543,7 +1558,6 @@ daily_signal_reference_events = all_signal_events(
     long_col="ichimoku_long_signal",
     short_col="ichimoku_short_signal",
 )
-
 daily_signal_markers = daily_signal_reference_events[
     daily_signal_reference_events["open_time"].isin(daily_chart["open_time"])
 ].copy()
@@ -1628,6 +1642,7 @@ st.plotly_chart(
         momentum_reference_events=hourly_signal_reference_events,
     ),
     use_container_width=True,
+    config=PLOTLY_CONFIG,
 )
 
 st.subheader(f"{selected_pair} — 15M (son 1 gün)")
@@ -1659,6 +1674,7 @@ st.plotly_chart(
         momentum_reference_events=m15_intrabar_signal_reference_events,
     ),
     use_container_width=True,
+    config=PLOTLY_CONFIG,
 )
 
 st.subheader(f"{selected_pair} — 1D Ichimoku")
@@ -1682,4 +1698,5 @@ st.plotly_chart(
         show_signal_markers=show_signal_markers_1d,
     ),
     use_container_width=True,
+    config=PLOTLY_CONFIG,
 )
