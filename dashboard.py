@@ -269,12 +269,21 @@ def _safe_round(value, digits=4):
         return None
     return round(float(value), digits)
 
-def add_ichimoku_signal_columns(df: pd.DataFrame) -> pd.DataFrame:
+def add_ichimoku_signal_columns(
+    df: pd.DataFrame,
+    ichimoku_rr_multiplier: float = 2.0,
+) -> pd.DataFrame:
     out = df.copy().sort_values("open_time").reset_index(drop=True)
+    rr_multiplier = max(float(ichimoku_rr_multiplier or 0), 0.0)
 
     signals = []
+    cloud_top_values = []
+    cloud_bottom_values = []
 
     for i, row in out.iterrows():
+        cloud_top_values.append(pd.NA)
+        cloud_bottom_values.append(pd.NA)
+
         if i < 26:
             signals.append("NEUTRAL")
             continue
@@ -297,6 +306,8 @@ def add_ichimoku_signal_columns(df: pd.DataFrame) -> pd.DataFrame:
 
         cloud_top = max(a, b)
         cloud_bottom = min(a, b)
+        cloud_top_values[-1] = cloud_top
+        cloud_bottom_values[-1] = cloud_bottom
 
         above_cloud = close_ > cloud_top
         below_cloud = close_ < cloud_bottom
@@ -315,6 +326,9 @@ def add_ichimoku_signal_columns(df: pd.DataFrame) -> pd.DataFrame:
             signals.append("NEUTRAL")
 
     out["ichimoku_signal"] = signals
+    out["ichimoku_cloud_top"] = cloud_top_values
+    out["ichimoku_cloud_bottom"] = cloud_bottom_values
+
     prev_signal = out["ichimoku_signal"].shift(1).fillna("NEUTRAL")
 
     out["ichimoku_long_signal"] = (
@@ -327,7 +341,61 @@ def add_ichimoku_signal_columns(df: pd.DataFrame) -> pd.DataFrame:
         (prev_signal != "SHORT")
     )
 
+    # TP line confirmation rule:
+    # Signal marker still appears on the signal candle.
+    # TP line is drawn only if the next daily candle closes with the same Ichimoku state.
+    next_signal = out["ichimoku_signal"].shift(-1)
+    out["ichimoku_tp_confirmed"] = (
+        (out["ichimoku_long_signal"] & next_signal.eq("LONG")) |
+        (out["ichimoku_short_signal"] & next_signal.eq("SHORT"))
+    )
+
+    out["ichimoku_entry_ref"] = pd.NA
+    out["ichimoku_sl_level"] = pd.NA
+    out["ichimoku_sl_distance"] = pd.NA
+    out["ichimoku_tp_level"] = pd.NA
+    out["ichimoku_rr"] = pd.NA
+
+    long_mask = out["ichimoku_long_signal"] == True
+    short_mask = out["ichimoku_short_signal"] == True
+    confirmed_mask = out["ichimoku_tp_confirmed"] == True
+
+    # LONG: SL = cloud bottom, TP = close + RR multiplier * (close - cloud bottom)
+    # TP values are populated only when the next daily candle confirms the same signal state.
+    confirmed_long_mask = long_mask & confirmed_mask
+    long_distance = out.loc[confirmed_long_mask, "close"] - out.loc[confirmed_long_mask, "ichimoku_cloud_bottom"]
+    valid_long = confirmed_long_mask.copy()
+    valid_long.loc[confirmed_long_mask] = long_distance > 0
+
+    out.loc[valid_long, "ichimoku_entry_ref"] = out.loc[valid_long, "close"]
+    out.loc[valid_long, "ichimoku_sl_level"] = out.loc[valid_long, "ichimoku_cloud_bottom"]
+    out.loc[valid_long, "ichimoku_sl_distance"] = (
+        out.loc[valid_long, "close"] - out.loc[valid_long, "ichimoku_cloud_bottom"]
+    )
+    out.loc[valid_long, "ichimoku_tp_level"] = (
+        out.loc[valid_long, "close"] + rr_multiplier * out.loc[valid_long, "ichimoku_sl_distance"]
+    )
+    out.loc[valid_long, "ichimoku_rr"] = rr_multiplier
+
+    # SHORT: SL = cloud top, TP = close - RR multiplier * (cloud top - close)
+    # TP values are populated only when the next daily candle confirms the same signal state.
+    confirmed_short_mask = short_mask & confirmed_mask
+    short_distance = out.loc[confirmed_short_mask, "ichimoku_cloud_top"] - out.loc[confirmed_short_mask, "close"]
+    valid_short = confirmed_short_mask.copy()
+    valid_short.loc[confirmed_short_mask] = short_distance > 0
+
+    out.loc[valid_short, "ichimoku_entry_ref"] = out.loc[valid_short, "close"]
+    out.loc[valid_short, "ichimoku_sl_level"] = out.loc[valid_short, "ichimoku_cloud_top"]
+    out.loc[valid_short, "ichimoku_sl_distance"] = (
+        out.loc[valid_short, "ichimoku_cloud_top"] - out.loc[valid_short, "close"]
+    )
+    out.loc[valid_short, "ichimoku_tp_level"] = (
+        out.loc[valid_short, "close"] - rr_multiplier * out.loc[valid_short, "ichimoku_sl_distance"]
+    )
+    out.loc[valid_short, "ichimoku_rr"] = rr_multiplier
+
     return out
+
 
 def _rsi_from_close_series(close: pd.Series, period: int) -> pd.Series:
     delta = close.diff()
@@ -1141,6 +1209,241 @@ def add_signal_markers(
         )
 
     return fig
+
+
+def add_ichimoku_signal_markers(
+    fig: go.Figure,
+    chart_df: pd.DataFrame,
+    marker_df: pd.DataFrame,
+    name_prefix: str = "1D Ichimoku Signal",
+) -> go.Figure:
+    if chart_df.empty or marker_df is None or marker_df.empty:
+        return fig
+
+    work = chart_df.copy()
+    work["open_time"] = pd.to_datetime(work["open_time"], errors="coerce", utc=True)
+
+    markers = marker_df.copy()
+    markers["open_time"] = pd.to_datetime(markers["open_time"], errors="coerce", utc=True)
+
+    keep_cols = [
+        "open_time",
+        "signal_type",
+        "ichimoku_entry_ref",
+        "ichimoku_sl_level",
+        "ichimoku_sl_distance",
+        "ichimoku_tp_level",
+        "ichimoku_rr",
+        "ichimoku_tp_confirmed",
+        "ichimoku_cloud_top",
+        "ichimoku_cloud_bottom",
+    ]
+    keep_cols = [col for col in keep_cols if col in markers.columns]
+
+    merged = markers[keep_cols].merge(
+        work[["open_time", "display_time", "high", "low"]],
+        on="open_time",
+        how="inner",
+    )
+
+    if merged.empty:
+        return fig
+
+    offset = _chart_price_offset(work, ratio=0.04)
+
+    custom_cols = [
+        "signal_type",
+        "ichimoku_entry_ref",
+        "ichimoku_sl_level",
+        "ichimoku_sl_distance",
+        "ichimoku_tp_level",
+        "ichimoku_rr",
+        "ichimoku_tp_confirmed",
+        "ichimoku_cloud_top",
+        "ichimoku_cloud_bottom",
+    ]
+
+    for col in custom_cols:
+        if col not in merged.columns:
+            merged[col] = pd.NA
+
+    hovertemplate = (
+        f"{name_prefix}<br>"
+        "Signal: %{customdata[0]}<br>"
+        "Time: %{x}<br>"
+        "<br>"
+        "Entry ref close: %{customdata[1]:.2f}<br>"
+        "SL level: %{customdata[2]:.2f}<br>"
+        "SL distance: %{customdata[3]:.2f}<br>"
+        "TP level: %{customdata[4]:.2f}<br>"
+        "Risk/Reward: %{customdata[5]:.1f}R<br>"
+        "TP confirmed next day: %{customdata[6]}<br>"
+        "Cloud top: %{customdata[7]:.2f}<br>"
+        "Cloud bottom: %{customdata[8]:.2f}<br>"
+        "<extra></extra>"
+    )
+
+    long_markers = merged[merged["signal_type"] == "LONG"].copy()
+    short_markers = merged[merged["signal_type"] == "SHORT"].copy()
+
+    if not long_markers.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=long_markers["display_time"],
+                y=long_markers["low"] - offset,
+                mode="markers",
+                marker=dict(symbol="triangle-up", size=13, color="green"),
+                name=f"{name_prefix} LONG",
+                showlegend=False,
+                customdata=long_markers[custom_cols],
+                hovertemplate=hovertemplate,
+            )
+        )
+
+    if not short_markers.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=short_markers["display_time"],
+                y=short_markers["high"] + offset,
+                mode="markers",
+                marker=dict(symbol="triangle-down", size=13, color="red"),
+                name=f"{name_prefix} SHORT",
+                showlegend=False,
+                customdata=short_markers[custom_cols],
+                hovertemplate=hovertemplate,
+            )
+        )
+
+    return fig
+
+
+def add_ichimoku_tp_segments(
+    fig: go.Figure,
+    chart_df: pd.DataFrame,
+    signal_events: pd.DataFrame,
+    show_tp_lines: bool = True,
+) -> go.Figure:
+    if not show_tp_lines or chart_df.empty or signal_events is None or signal_events.empty:
+        return fig
+
+    required_cols = {"open_time", "signal_type", "ichimoku_tp_level"}
+    if not required_cols.issubset(set(signal_events.columns)):
+        return fig
+
+    work = chart_df.copy()
+    work["open_time"] = pd.to_datetime(work["open_time"], errors="coerce", utc=True)
+
+    if "display_time" not in work.columns:
+        work["display_time"] = work["open_time"].dt.tz_convert(DISPLAY_TZ)
+
+    work = (
+        work
+        .dropna(subset=["open_time"])
+        .sort_values("open_time")
+        .reset_index(drop=True)
+    )
+
+    if work.empty:
+        return fig
+
+    events = signal_events.copy()
+    events["open_time"] = pd.to_datetime(events["open_time"], errors="coerce", utc=True)
+    events["ichimoku_tp_level"] = pd.to_numeric(events["ichimoku_tp_level"], errors="coerce")
+    events["signal_type"] = events["signal_type"].astype(str).str.upper()
+
+    # TP line confirmation:
+    # If the column exists, draw TP lines only for signals confirmed by the next daily close.
+    if "ichimoku_tp_confirmed" in events.columns:
+        confirmed_mask = events["ichimoku_tp_confirmed"].fillna(False).astype(bool)
+        events = events[confirmed_mask].copy()
+
+    events = (
+        events[events["signal_type"].isin(["LONG", "SHORT"])]
+        .dropna(subset=["open_time", "ichimoku_tp_level"])
+        .sort_values("open_time")
+        .reset_index(drop=True)
+    )
+
+    if events.empty:
+        return fig
+
+    visible_start = work["open_time"].min()
+    visible_end = work["open_time"].max()
+
+    for idx, event in events.iterrows():
+        signal_time = event["open_time"]
+        signal_type = event["signal_type"]
+        tp_level = float(event["ichimoku_tp_level"])
+
+        next_opposite = events[
+            (events["open_time"] > signal_time) &
+            (events["signal_type"] != signal_type)
+        ].head(1)
+
+        next_opposite_time = (
+            next_opposite.iloc[0]["open_time"]
+            if not next_opposite.empty
+            else pd.NaT
+        )
+
+        search_end = next_opposite_time if pd.notna(next_opposite_time) else visible_end
+
+        search_window = work[
+            (work["open_time"] >= signal_time) &
+            (work["open_time"] <= search_end)
+        ].copy()
+
+        tp_hit_time = pd.NaT
+        if not search_window.empty:
+            if signal_type == "LONG":
+                hit_rows = search_window[pd.to_numeric(search_window["high"], errors="coerce") >= tp_level]
+            else:
+                hit_rows = search_window[pd.to_numeric(search_window["low"], errors="coerce") <= tp_level]
+
+            if not hit_rows.empty:
+                tp_hit_time = hit_rows.iloc[0]["open_time"]
+
+        end_time = visible_end
+        tp_status = "open"
+
+        if pd.notna(tp_hit_time):
+            end_time = tp_hit_time
+            tp_status = "hit"
+
+        if pd.notna(next_opposite_time) and next_opposite_time < end_time:
+            end_time = next_opposite_time
+            tp_status = "ended by opposite signal"
+
+        # Çizgi görünür grafik aralığıyla kesişmiyorsa çizme.
+        if end_time < visible_start or signal_time > visible_end:
+            continue
+
+        x0_time = max(signal_time, visible_start)
+        x1_time = min(end_time, visible_end)
+
+        x0_display = pd.Timestamp(x0_time).tz_convert(DISPLAY_TZ)
+        x1_display = pd.Timestamp(x1_time).tz_convert(DISPLAY_TZ)
+
+        fig.add_trace(
+            go.Scatter(
+                x=[x0_display, x1_display],
+                y=[tp_level, tp_level],
+                mode="lines",
+                line=dict(color="yellow", width=2),
+                name="Ichimoku TP",
+                showlegend=False,
+                customdata=[[signal_type, tp_level, tp_status]],
+                hovertemplate=(
+                    "Ichimoku TP<br>"
+                    "Signal: %{customdata[0]}<br>"
+                    "TP level: %{customdata[1]:.2f}<br>"
+                    "Status: %{customdata[2]}<br>"
+                    "<extra></extra>"
+                ),
+            )
+        )
+
+    return fig
     
 def make_price_ema_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | None = None, show_zones: bool = False, zone_buffer: float = 0.0,ma_display: str = "EMA",signal_markers: pd.DataFrame | None = None,
     show_signal_markers: bool = False,
@@ -1274,7 +1577,7 @@ def make_price_ema_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | Non
     return fig
 
 
-def make_ichimoku_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | None = None, show_zones: bool = False,zone_buffer: float = 0.0, signal_markers: pd.DataFrame | None = None, show_signal_markers: bool = False,) -> go.Figure:
+def make_ichimoku_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | None = None, show_zones: bool = False,zone_buffer: float = 0.0, signal_markers: pd.DataFrame | None = None, show_signal_markers: bool = False, tp_signal_events: pd.DataFrame | None = None, show_tp_lines: bool = True,) -> go.Figure:
     plot_df = df.copy()
     plot_df["display_time"] = plot_df["open_time"].dt.tz_convert(DISPLAY_TZ)
     
@@ -1440,8 +1743,15 @@ def make_ichimoku_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | None
     show_zones=show_zones,
     zone_buffer=zone_buffer,
 )
+    fig = add_ichimoku_tp_segments(
+        fig=fig,
+        chart_df=plot_df,
+        signal_events=tp_signal_events if tp_signal_events is not None else pd.DataFrame(),
+        show_tp_lines=show_tp_lines,
+    )
+
     if show_signal_markers and signal_markers is not None and not signal_markers.empty:
-        fig = add_signal_markers(
+        fig = add_ichimoku_signal_markers(
             fig=fig,
             chart_df=plot_df,
             marker_df=signal_markers,
@@ -1498,10 +1808,18 @@ momentum_threshold_pct = st.number_input(
     step=5.0,
     help="Momentum = abs(close - open) / zone mesafesi. Varsayılan %35. Buffer hesaba dahil edilmez.",
 )
+ichimoku_rr_multiplier = st.number_input(
+    "1D Ichimoku TP multiplier (R)",
+    min_value=0.1,
+    max_value=10.0,
+    value=2.0,
+    step=0.25,
+    help="Ichimoku TP hesabında SL mesafesinin kaç katının hedef alınacağını belirler. Örn. 2.0 = 2R.",
+)
 
 with st.expander("Gösterge açıklamaları"):
     st.markdown(
-        """
+        f"""
 - **EMA/SMA çizgileri:** Seçili hareketli ortalama çizgileri. Plotly legend'da sadece bunlar gösterilir.
 - **Zone çizgisi:** Siyah kesikli yatay çizgi.
 - **Zone buffer:** Zone çizgisinin altındaki/üstündeki hafif gri yatay bant.
@@ -1510,6 +1828,8 @@ with st.expander("Gösterge açıklamaları"):
 - **LONG sinyal:** Yeşil yukarı üçgen.
 - **SHORT sinyal:** Kırmızı aşağı üçgen.
 - **15M sinyal referansı:** 15M'in kendi sinyali değildir; 1H sinyalinin 15M içi referans noktasıdır.
+- **1D Ichimoku TP/SL:** Sinyal mumunun kapanışı entry referansıdır. LONG için SL bulut alt sınırı, SHORT için SL bulut üst sınırıdır. TP = entry referansı ± {ichimoku_rr_multiplier:g} × SL mesafesi.
+- **1D Ichimoku TP çizgisi:** Sarı düz yatay çizgi. Sinyal marker mumunda görünür ama TP çizgisi yalnızca bir sonraki günlük mum aynı Ichimoku sinyal state'iyle kapanırsa çizilir. Çizgi sinyal mumundan başlar; TP'ye temas edilirse orada, TP'den önce zıt Ichimoku sinyali gelirse zıt sinyalde biter.
         """
     )
 
@@ -1536,7 +1856,10 @@ hourly_chart = hourly.tail(48).copy()
 m15_chart = m15.tail(96).copy()
 #daily_chart = daily.tail(220).copy()
 
-daily = add_ichimoku_signal_columns(daily)
+daily = add_ichimoku_signal_columns(
+    daily,
+    ichimoku_rr_multiplier=ichimoku_rr_multiplier,
+)
 daily_chart = daily.tail(220).copy()
 
 hourly_signal_reference_events = all_signal_events(hourly)
@@ -1558,6 +1881,27 @@ daily_signal_reference_events = all_signal_events(
     long_col="ichimoku_long_signal",
     short_col="ichimoku_short_signal",
 )
+
+ichimoku_trade_cols = [
+    "open_time",
+    "ichimoku_entry_ref",
+    "ichimoku_sl_level",
+    "ichimoku_sl_distance",
+    "ichimoku_tp_level",
+    "ichimoku_rr",
+    "ichimoku_tp_confirmed",
+    "ichimoku_cloud_top",
+    "ichimoku_cloud_bottom",
+]
+ichimoku_trade_cols = [col for col in ichimoku_trade_cols if col in daily.columns]
+
+if not daily_signal_reference_events.empty:
+    daily_signal_reference_events = daily_signal_reference_events.merge(
+        daily[ichimoku_trade_cols],
+        on="open_time",
+        how="left",
+    )
+
 daily_signal_markers = daily_signal_reference_events[
     daily_signal_reference_events["open_time"].isin(daily_chart["open_time"])
 ].copy()
@@ -1679,13 +2023,16 @@ st.plotly_chart(
 
 st.subheader(f"{selected_pair} — 1D Ichimoku")
 
-col_1d_a, col_1d_b = st.columns(2)
+col_1d_a, col_1d_b, col_1d_c = st.columns(3)
 
 with col_1d_a:
     show_zones_1d = st.toggle("1D yakın zone çizgileri", value=False, key="show_zones_1d")
 
 with col_1d_b:
     show_signal_markers_1d = st.toggle("1D Ichimoku sinyal markerları", value=True, key="show_signal_markers_1d")
+
+with col_1d_c:
+    show_ichimoku_tp_lines = st.toggle("1D Ichimoku TP çizgileri", value=True, key="show_ichimoku_tp_lines")
 
 st.plotly_chart(
     make_ichimoku_chart(
@@ -1696,6 +2043,8 @@ st.plotly_chart(
         zone_buffer=zone_buffer,
         signal_markers=daily_signal_markers,
         show_signal_markers=show_signal_markers_1d,
+        tp_signal_events=daily_signal_reference_events,
+        show_tp_lines=show_ichimoku_tp_lines,
     ),
     use_container_width=True,
     config=PLOTLY_CONFIG,
