@@ -46,6 +46,107 @@ def load_cached_raw_data() -> dict:
         raise SystemExit(f"Missing {INPUT_FILE}. Fetch stage must run before process stage.")
     return json.loads(INPUT_FILE.read_text(encoding="utf-8"))
 
+def fetch_open_ichimoku_trade_states(supabase, pair: str) -> List[Dict]:
+    """
+    Fetch non-final Ichimoku 1D trade lifecycle states for this pair.
+
+    Final states are intentionally excluded:
+    - CONFIRMATION_FAILED
+    - INVALIDATED_BEFORE_TP
+    - ENDED_AFTER_TP
+    - REVERSED_BEFORE_TP
+    - REVERSED_AFTER_TP
+
+    TP_HIT is kept open until the Ichimoku state later ends or reverses,
+    because we still want to send a different close message after TP was hit.
+    """
+    active_statuses = [
+        "PENDING_CONFIRMATION",
+        "ACTIVE",
+        "TP_HIT",
+    ]
+
+    resp = (
+        supabase
+        .table("ichimoku_trade_states")
+        .select("*")
+        .eq("pair", pair)
+        .in_("status", active_statuses)
+        .order("signal_time", desc=True)
+        .execute()
+    )
+
+    return resp.data or []
+
+
+def get_latest_open_ichimoku_trade_state(supabase, pair: str) -> Dict | None:
+    rows = fetch_open_ichimoku_trade_states(supabase, pair)
+    return rows[0] if rows else None
+
+
+def insert_ichimoku_trade_state(
+    supabase,
+    *,
+    pair: str,
+    signal_type: str,
+    signal_time: str,
+    signal_close: float,
+    entry_ref: float,
+    cloud_top: float,
+    cloud_bottom: float,
+    sl_level: float,
+    sl_distance: float,
+    tp_multiplier: float,
+    tp_level: float,
+) -> Dict | None:
+    row = {
+        "pair": pair,
+        "signal_type": signal_type,
+        "signal_time": signal_time,
+        "signal_close": signal_close,
+        "entry_ref": entry_ref,
+        "cloud_top": cloud_top,
+        "cloud_bottom": cloud_bottom,
+        "sl_level": sl_level,
+        "sl_distance": sl_distance,
+        "tp_multiplier": tp_multiplier,
+        "tp_level": tp_level,
+        "status": "PENDING_CONFIRMATION",
+    }
+
+    resp = (
+        supabase
+        .table("ichimoku_trade_states")
+        .upsert(
+            row,
+            on_conflict="pair,signal_time,signal_type",
+        )
+        .execute()
+    )
+
+    data = resp.data or []
+    return data[0] if data else None
+
+
+def update_ichimoku_trade_state(
+    supabase,
+    state_id: int,
+    updates: Dict,
+) -> Dict | None:
+    payload = dict(updates)
+    payload["updated_at"] = pd.Timestamp.utcnow().isoformat().replace("+00:00", "Z")
+
+    resp = (
+        supabase
+        .table("ichimoku_trade_states")
+        .update(payload)
+        .eq("id", state_id)
+        .execute()
+    )
+
+    data = resp.data or []
+    return data[0] if data else None
+    
 
 def run() -> None:
     supabase = create_supabase_client_from_env()
