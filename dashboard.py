@@ -4,6 +4,7 @@ import re
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh
 from supabase import create_client
 
 st.set_page_config(page_title="Crypto Futures Dashboard", layout="wide")
@@ -24,6 +25,22 @@ header {visibility: hidden;}
 
 [data-testid="stMainMenu"] {
     visibility: hidden;
+}
+
+/* Sayfanın üst boşluğunu azaltır */
+.block-container {
+    padding-top: 1.5rem;
+    padding-bottom: 2rem;
+}
+
+/* Başlık ile ilk input alanı arasındaki boşluğu biraz azaltır */
+h2 {
+    margin-bottom: 0.4rem;
+}
+
+/* Expander'ların üst-alt boşluğunu biraz kompakt hale getirir */
+[data-testid="stExpander"] {
+    margin-bottom: 0.4rem;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -1780,7 +1797,9 @@ def make_ichimoku_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | None
 # =========================================================
 # UI
 # =========================================================
+st.markdown("## Crypto Futures Strategy Dashboard")
 # st.caption("Perpetual futures candles come from Supabase cache populated by your GitHub pipeline.")
+
 refresh_count = st_autorefresh(
     interval=300000,
     key="dashboard_autorefresh",
@@ -1789,10 +1808,10 @@ refresh_count = st_autorefresh(
 st.caption(
     f"Dashboard otomatik yenilenir: 5 dk | Son yenileme: {pd.Timestamp.now(tz=DISPLAY_TZ).strftime('%Y-%m-%d %H:%M:%S')} | Refresh: {refresh_count}"
 )
-st.markdown("## Crypto Futures Strategy Dashboard")
+
 pair_options = load_pair_options()
 
-top_col1, top_col2 = st.columns([1.2, 1.8])
+top_col1, top_col2 = st.columns([1.1, 1.9])
 
 with top_col1:
     selected_pair = st.selectbox(
