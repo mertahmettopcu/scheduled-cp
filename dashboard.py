@@ -4,7 +4,6 @@ import re
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-from streamlit_autorefresh import st_autorefresh
 from supabase import create_client
 
 st.set_page_config(page_title="Crypto Futures Dashboard", layout="wide")
@@ -582,7 +581,7 @@ def add_momentum_highlights(
         fig.add_vrect(
             x0=display_time - half_delta,
             x1=display_time + half_delta,
-            fillcolor="rgba(142, 210, 174, 0.23)" if not is_counter else "rgba(255, 120, 120, 0.28)",
+            fillcolor="rgba(180, 180, 180, 0.18)" if not is_counter else "rgba(255, 120, 120, 0.28)",
             line_width=0,
             layer="below",
         )
@@ -1260,7 +1259,7 @@ def make_price_ema_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | Non
         momentum_threshold_pct=momentum_threshold_pct,
     )
     fig.update_layout(
-        title="",
+        title=None,
         xaxis_title="Time",
         yaxis_title="Price",
         xaxis_rangeslider_visible=False,
@@ -1453,7 +1452,7 @@ def make_ichimoku_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | None
     x_max = plot_df["display_time"].max() + pd.Timedelta(days=26)
 
     fig.update_layout(
-        title="",
+        title=None,
         xaxis_title="Date",
         yaxis_title="Price",
         xaxis_rangeslider_visible=False,
@@ -1472,14 +1471,6 @@ def make_ichimoku_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | None
 # UI
 # =========================================================
 st.title("Crypto Futures Strategy Dashboard")
-refresh_count = st_autorefresh(
-    interval=300000,
-    key="dashboard_autorefresh",
-)
-
-st.caption(
-    f"Dashboard otomatik yenilenir: 5 dk | Son yenileme: {pd.Timestamp.now(tz=DISPLAY_TZ).strftime('%Y-%m-%d %H:%M:%S')} | Refresh: {refresh_count}"
-)
 #st.caption("Perpetual futures candles come from Supabase cache populated by your GitHub pipeline.")
 
 #selected_pair = st.selectbox("Crypto seç", PAIR_OPTIONS, index=0)
