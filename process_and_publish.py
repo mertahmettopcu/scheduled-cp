@@ -147,7 +147,307 @@ def update_ichimoku_trade_state(
     data = resp.data or []
     return data[0] if data else None
     
+def _iso_from_ts(value) -> str:
+    ts = pd.Timestamp(value)
 
+    if ts.tzinfo is None:
+        ts = ts.tz_localize("UTC")
+
+    return ts.tz_convert("UTC").isoformat().replace("+00:00", "Z")
+
+
+def _state_is_opposite(state_signal: str | None, current_signal: str | None) -> bool:
+    state_signal = normalize_signal(state_signal)
+    current_signal = normalize_signal(current_signal)
+
+    return (
+        state_signal in {"LONG", "SHORT"}
+        and current_signal in {"LONG", "SHORT"}
+        and state_signal != current_signal
+    )
+
+
+def _tp_hit_for_state(row_1d: pd.Series, state: Dict) -> bool:
+    signal_type = normalize_signal(state.get("signal_type"))
+    tp_level = state.get("tp_level")
+
+    if tp_level is None or pd.isna(tp_level):
+        return False
+
+    tp_level = float(tp_level)
+
+    if signal_type == "LONG":
+        return bool(float(row_1d["high"]) >= tp_level)
+
+    if signal_type == "SHORT":
+        return bool(float(row_1d["low"]) <= tp_level)
+
+    return False
+
+
+def _build_trade_state_insert_payload(
+    pair: str,
+    signal_type: str,
+    latest_1d: pd.Series,
+    df_1d_ichi: pd.DataFrame,
+    tp_multiplier: float,
+) -> Dict | None:
+    plan = calculate_ichimoku_trade_plan(
+        df=df_1d_ichi,
+        signal_type=signal_type,
+        tp_multiplier=tp_multiplier,
+    )
+
+    if not plan.get("valid"):
+        log(
+            f"  └─ Ichimoku trade plan skipped for {pair}: "
+            f"{signal_type} plan invalid ({plan.get('reason')})"
+        )
+        return None
+
+    return {
+        "pair": pair,
+        "signal_type": signal_type,
+        "signal_time": _iso_from_ts(latest_1d["open_time"]),
+        "signal_close": float(latest_1d["close"]),
+        "entry_ref": float(plan["entry_ref"]),
+        "cloud_top": float(plan["cloud_top"]),
+        "cloud_bottom": float(plan["cloud_bottom"]),
+        "sl_level": float(plan["sl_level"]),
+        "sl_distance": float(plan["sl_distance"]),
+        "tp_multiplier": float(plan["tp_multiplier"]),
+        "tp_level": float(plan["tp_level"]),
+    }
+
+
+def handle_pending_ichimoku_state(
+    supabase,
+    *,
+    pair: str,
+    state: Dict,
+    current_signal_1d: str,
+    latest_1d: pd.Series,
+    df_1d_ichi: pd.DataFrame,
+    candle_time_1d: str,
+) -> List[str]:
+    """
+    Handles PENDING_CONFIRMATION state.
+
+    If next 1D close stays in same direction:
+    PENDING_CONFIRMATION -> ACTIVE
+
+    If not:
+    PENDING_CONFIRMATION -> CONFIRMATION_FAILED
+
+    Returns Telegram message texts.
+    """
+    messages: List[str] = []
+
+    state_id = state["id"]
+    state_signal = normalize_signal(state.get("signal_type"))
+    current_signal = normalize_signal(current_signal_1d)
+
+    # Aynı sinyal mumunda confirmation kontrolü yapılmasın.
+    # Confirmation için en az bir sonraki daily mum kapanışı gerekir.
+    state_signal_time = pd.Timestamp(state["signal_time"])
+    current_open_time = pd.Timestamp(latest_1d["open_time"])
+
+    if current_open_time <= state_signal_time:
+        return messages
+
+    if current_signal == state_signal:
+        updated = update_ichimoku_trade_state(
+            supabase,
+            state_id,
+            {
+                "status": "ACTIVE",
+                "confirmation_candle_time": _iso_from_ts(latest_1d["open_time"]),
+                "confirmation_notified": True,
+            },
+        ) or state
+
+        messages.append(
+            build_ichimoku_tp_confirmed_message(
+                pair=pair,
+                trade_state=updated,
+                candle_time_1d=candle_time_1d,
+                streamlit_app_url=STREAMLIT_APP_URL,
+            )
+        )
+
+        log(f"  └─ Ichimoku TP confirmed for {pair}")
+        return messages
+
+    updated = update_ichimoku_trade_state(
+        supabase,
+        state_id,
+        {
+            "status": "CONFIRMATION_FAILED",
+            "closed_at": _iso_from_ts(latest_1d["open_time"]),
+            "close_reason": "NEXT_DAILY_CLOSE_DID_NOT_CONFIRM",
+            "confirmation_failed_notified": True,
+        },
+    ) or state
+
+    messages.append(
+        build_ichimoku_confirmation_failed_message(
+            pair=pair,
+            trade_state=updated,
+            current_signal=current_signal,
+            df_1d_ichi=df_1d_ichi,
+            candle_time_1d=candle_time_1d,
+            streamlit_app_url=STREAMLIT_APP_URL,
+            tp_multiplier=ICHIMOKU_TP_MULTIPLIER,
+        )
+    )
+
+    log(f"  └─ Ichimoku TP confirmation failed for {pair}")
+    return messages
+
+
+def handle_active_ichimoku_state(
+    supabase,
+    *,
+    pair: str,
+    state: Dict,
+    current_signal_1d: str,
+    latest_1d: pd.Series,
+    candle_time_1d: str,
+) -> List[str]:
+    """
+    Handles ACTIVE or TP_HIT state.
+
+    ACTIVE:
+    - If TP hit: ACTIVE -> TP_HIT
+    - If state becomes NEUTRAL before TP: ACTIVE -> INVALIDATED_BEFORE_TP
+    - If opposite signal before TP: ACTIVE -> REVERSED_BEFORE_TP
+
+    TP_HIT:
+    - If state becomes NEUTRAL after TP: TP_HIT -> ENDED_AFTER_TP
+    - If opposite signal after TP: TP_HIT -> REVERSED_AFTER_TP
+    """
+    messages: List[str] = []
+
+    state_id = state["id"]
+    status = str(state.get("status") or "").upper()
+    state_signal = normalize_signal(state.get("signal_type"))
+    current_signal = normalize_signal(current_signal_1d)
+
+    tp_already_hit = status == "TP_HIT" or bool(state.get("tp_hit_time"))
+
+    if status == "ACTIVE" and _tp_hit_for_state(latest_1d, state):
+        updated = update_ichimoku_trade_state(
+            supabase,
+            state_id,
+            {
+                "status": "TP_HIT",
+                "tp_hit_time": _iso_from_ts(latest_1d["open_time"]),
+                "tp_hit_notified": True,
+            },
+        ) or state
+
+        messages.append(
+            build_ichimoku_tp_hit_message(
+                pair=pair,
+                trade_state=updated,
+                candle_time_1d=candle_time_1d,
+                streamlit_app_url=STREAMLIT_APP_URL,
+            )
+        )
+
+        log(f"  └─ Ichimoku TP hit for {pair}")
+        return messages
+
+    if current_signal == state_signal:
+        return messages
+
+    if current_signal == "NEUTRAL":
+        if tp_already_hit:
+            updated = update_ichimoku_trade_state(
+                supabase,
+                state_id,
+                {
+                    "status": "ENDED_AFTER_TP",
+                    "closed_at": _iso_from_ts(latest_1d["open_time"]),
+                    "close_reason": "STATE_ENDED_AFTER_TP",
+                    "close_notified": True,
+                },
+            ) or state
+
+            messages.append(
+                build_ichimoku_state_closed_message(
+                    pair=pair,
+                    trade_state=updated,
+                    current_signal=current_signal,
+                    candle_time_1d=candle_time_1d,
+                    streamlit_app_url=STREAMLIT_APP_URL,
+                    event_title="Signal ended after TP hit",
+                    note="Ichimoku state ended after target was reached.",
+                    suffix="ℹ️",
+                )
+            )
+
+            log(f"  └─ Ichimoku state ended after TP for {pair}")
+            return messages
+
+        updated = update_ichimoku_trade_state(
+            supabase,
+            state_id,
+            {
+                "status": "INVALIDATED_BEFORE_TP",
+                "closed_at": _iso_from_ts(latest_1d["open_time"]),
+                "close_reason": "STATE_INVALIDATED_BEFORE_TP",
+                "close_notified": True,
+            },
+        ) or state
+
+        messages.append(
+            build_ichimoku_state_closed_message(
+                pair=pair,
+                trade_state=updated,
+                current_signal=current_signal,
+                candle_time_1d=candle_time_1d,
+                streamlit_app_url=STREAMLIT_APP_URL,
+                event_title="Confirmed signal invalidated before TP",
+                note="Confirmed Ichimoku context ended before TP was reached.",
+                suffix="⚠️",
+            )
+        )
+
+        log(f"  └─ Ichimoku active state invalidated before TP for {pair}")
+        return messages
+
+    # Opposite LONG/SHORT reversal closure. Yeni sinyal mesajı 4.4'te birleşik olarak üretilecek.
+    if _state_is_opposite(state_signal, current_signal):
+        if tp_already_hit:
+            update_ichimoku_trade_state(
+                supabase,
+                state_id,
+                {
+                    "status": "REVERSED_AFTER_TP",
+                    "closed_at": _iso_from_ts(latest_1d["open_time"]),
+                    "close_reason": "OPPOSITE_SIGNAL_AFTER_TP",
+                    "close_notified": True,
+                },
+            )
+            log(f"  └─ Ichimoku state reversed after TP for {pair}")
+            return messages
+
+        update_ichimoku_trade_state(
+            supabase,
+            state_id,
+            {
+                "status": "REVERSED_BEFORE_TP",
+                "closed_at": _iso_from_ts(latest_1d["open_time"]),
+                "close_reason": "OPPOSITE_SIGNAL_BEFORE_TP",
+                "close_notified": True,
+            },
+        )
+        log(f"  └─ Ichimoku state reversed before TP for {pair}")
+        return messages
+
+    return messages
+    
 def run() -> None:
     supabase = create_supabase_client_from_env()
     raw_payload = load_cached_raw_data()
