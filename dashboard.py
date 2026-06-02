@@ -269,8 +269,12 @@ def _safe_round(value, digits=4):
         return None
     return round(float(value), digits)
 
-def add_ichimoku_signal_columns(df: pd.DataFrame) -> pd.DataFrame:
+def add_ichimoku_signal_columns(
+    df: pd.DataFrame,
+    ichimoku_rr_multiplier: float = 2.0,
+) -> pd.DataFrame:
     out = df.copy().sort_values("open_time").reset_index(drop=True)
+    rr_multiplier = max(float(ichimoku_rr_multiplier or 0), 0.0)
 
     signals = []
     cloud_top_values = []
@@ -346,7 +350,7 @@ def add_ichimoku_signal_columns(df: pd.DataFrame) -> pd.DataFrame:
     long_mask = out["ichimoku_long_signal"] == True
     short_mask = out["ichimoku_short_signal"] == True
 
-    # LONG: SL = cloud bottom, TP = close + 2 * (close - cloud bottom)
+    # LONG: SL = cloud bottom, TP = close + RR multiplier * (close - cloud bottom)
     long_distance = out.loc[long_mask, "close"] - out.loc[long_mask, "ichimoku_cloud_bottom"]
     valid_long = long_mask.copy()
     valid_long.loc[long_mask] = long_distance > 0
@@ -357,11 +361,11 @@ def add_ichimoku_signal_columns(df: pd.DataFrame) -> pd.DataFrame:
         out.loc[valid_long, "close"] - out.loc[valid_long, "ichimoku_cloud_bottom"]
     )
     out.loc[valid_long, "ichimoku_tp_level"] = (
-        out.loc[valid_long, "close"] + 2 * out.loc[valid_long, "ichimoku_sl_distance"]
+        out.loc[valid_long, "close"] + rr_multiplier * out.loc[valid_long, "ichimoku_sl_distance"]
     )
-    out.loc[valid_long, "ichimoku_rr"] = 2.0
+    out.loc[valid_long, "ichimoku_rr"] = rr_multiplier
 
-    # SHORT: SL = cloud top, TP = close - 2 * (cloud top - close)
+    # SHORT: SL = cloud top, TP = close - RR multiplier * (cloud top - close)
     short_distance = out.loc[short_mask, "ichimoku_cloud_top"] - out.loc[short_mask, "close"]
     valid_short = short_mask.copy()
     valid_short.loc[short_mask] = short_distance > 0
@@ -372,9 +376,9 @@ def add_ichimoku_signal_columns(df: pd.DataFrame) -> pd.DataFrame:
         out.loc[valid_short, "ichimoku_cloud_top"] - out.loc[valid_short, "close"]
     )
     out.loc[valid_short, "ichimoku_tp_level"] = (
-        out.loc[valid_short, "close"] - 2 * out.loc[valid_short, "ichimoku_sl_distance"]
+        out.loc[valid_short, "close"] - rr_multiplier * out.loc[valid_short, "ichimoku_sl_distance"]
     )
-    out.loc[valid_short, "ichimoku_rr"] = 2.0
+    out.loc[valid_short, "ichimoku_rr"] = rr_multiplier
 
     return out
 
@@ -1781,10 +1785,18 @@ momentum_threshold_pct = st.number_input(
     step=5.0,
     help="Momentum = abs(close - open) / zone mesafesi. Varsayılan %35. Buffer hesaba dahil edilmez.",
 )
+ichimoku_rr_multiplier = st.number_input(
+    "1D Ichimoku TP multiplier (R)",
+    min_value=0.1,
+    max_value=10.0,
+    value=2.0,
+    step=0.25,
+    help="Ichimoku TP hesabında SL mesafesinin kaç katının hedef alınacağını belirler. Örn. 2.0 = 2R.",
+)
 
 with st.expander("Gösterge açıklamaları"):
     st.markdown(
-        """
+        f"""
 - **EMA/SMA çizgileri:** Seçili hareketli ortalama çizgileri. Plotly legend'da sadece bunlar gösterilir.
 - **Zone çizgisi:** Siyah kesikli yatay çizgi.
 - **Zone buffer:** Zone çizgisinin altındaki/üstündeki hafif gri yatay bant.
@@ -1793,7 +1805,7 @@ with st.expander("Gösterge açıklamaları"):
 - **LONG sinyal:** Yeşil yukarı üçgen.
 - **SHORT sinyal:** Kırmızı aşağı üçgen.
 - **15M sinyal referansı:** 15M'in kendi sinyali değildir; 1H sinyalinin 15M içi referans noktasıdır.
-- **1D Ichimoku TP/SL:** Sinyal mumunun kapanışı entry referansıdır. LONG için SL bulut alt sınırı, SHORT için SL bulut üst sınırıdır. TP = entry referansı ± 2 × SL mesafesi.
+- **1D Ichimoku TP/SL:** Sinyal mumunun kapanışı entry referansıdır. LONG için SL bulut alt sınırı, SHORT için SL bulut üst sınırıdır. TP = entry referansı ± {ichimoku_rr_multiplier:g} × SL mesafesi.
 - **1D Ichimoku TP çizgisi:** Sarı düz yatay çizgi. Sinyal mumundan TP temasına kadar uzanır; zıt Ichimoku sinyali önce gelirse orada biter.
         """
     )
@@ -1821,7 +1833,10 @@ hourly_chart = hourly.tail(48).copy()
 m15_chart = m15.tail(96).copy()
 #daily_chart = daily.tail(220).copy()
 
-daily = add_ichimoku_signal_columns(daily)
+daily = add_ichimoku_signal_columns(
+    daily,
+    ichimoku_rr_multiplier=ichimoku_rr_multiplier,
+)
 daily_chart = daily.tail(220).copy()
 
 hourly_signal_reference_events = all_signal_events(hourly)
