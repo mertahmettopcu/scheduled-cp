@@ -242,4 +242,5 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_IDS: ${{ secrets.TELEGRAM_CHAT_IDS }}
           STREAMLIT_APP_URL: ${{ secrets.STREAMLIT_APP_URL }}
+          ICHIMOKU_TP_MULTIPLIER: ${{ secrets.ICHIMOKU_TP_MULTIPLIER }}
         run: python process_and_publish.py
