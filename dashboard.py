@@ -1780,50 +1780,75 @@ def make_ichimoku_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | None
 # =========================================================
 # UI
 # =========================================================
-st.title("Crypto Futures Strategy Dashboard")
-#st.caption("Perpetual futures candles come from Supabase cache populated by your GitHub pipeline.")
+st.markdown("## Crypto Futures Strategy Dashboard")
+# st.caption("Perpetual futures candles come from Supabase cache populated by your GitHub pipeline.")
+refresh_count = st_autorefresh(
+    interval=300000,
+    key="dashboard_autorefresh",
+)
 
-#selected_pair = st.selectbox("Crypto seç", PAIR_OPTIONS, index=0)
+st.caption(
+    f"Dashboard otomatik yenilenir: 5 dk | Son yenileme: {pd.Timestamp.now(tz=DISPLAY_TZ).strftime('%Y-%m-%d %H:%M:%S')} | Refresh: {refresh_count}"
+)
 pair_options = load_pair_options()
-selected_pair = st.selectbox("Crypto seç", pair_options, index=0)
-zone_buffer = st.number_input(
-    "Manual zone buffer",
-    min_value=0.0,
-    value=150.0,
-    step=50.0,
-    help="Zone çizgisinin altına ve üstüne eklenecek sabit fiyat aralığı. 0 girilirse sadece zone çizgisi çizilir.",
-)
-ma_display = st.radio(
-    "Grafikte gösterilecek hareketli ortalama",
-    ["EMA", "SMA", "EMA + SMA"],
-    index=1,
-    horizontal=True,
-    help="Bu seçim sadece grafikte çizilen ortalamaları değiştirir. Pipeline sinyali SMA4/SMA16 + RSI filtrelerine göre üretilir.",
-)
-momentum_threshold_pct = st.number_input(
-    "Momentum threshold (%)",
-    min_value=0.0,
-    max_value=100.0,
-    value=35.0,
-    step=5.0,
-    help="Momentum = abs(close - open) / zone mesafesi. Varsayılan %35. Buffer hesaba dahil edilmez.",
-)
-ichimoku_rr_multiplier = st.number_input(
-    "1D Ichimoku TP multiplier (R)",
-    min_value=0.1,
-    max_value=10.0,
-    value=1.7,
-    step=0.1,
-    help="Ichimoku TP hesabında SL mesafesinin kaç katının hedef alınacağını belirler. Örn. 2.0 = 2R.",
-)
 
-with st.expander("Gösterge açıklamaları"):
+top_col1, top_col2 = st.columns([1.2, 1.8])
+
+with top_col1:
+    selected_pair = st.selectbox(
+        "Crypto seç",
+        pair_options,
+        index=0,
+    )
+
+with top_col2:
+    ma_display = st.radio(
+        "Grafikte gösterilecek hareketli ortalama",
+        ["EMA", "SMA", "EMA + SMA"],
+        index=1,
+        horizontal=True,
+        help="Bu seçim sadece grafikte çizilen ortalamaları değiştirir. Pipeline sinyali SMA4/SMA16 + RSI filtrelerine göre üretilir.",
+    )
+
+with st.expander("Grafik ayarları", expanded=False):
+    settings_col1, settings_col2, settings_col3 = st.columns(3)
+
+    with settings_col1:
+        zone_buffer = st.number_input(
+            "Manual zone buffer",
+            min_value=0.0,
+            value=150.0,
+            step=50.0,
+            help="Zone çizgisinin altına ve üstüne eklenecek sabit fiyat aralığı. 0 girilirse sadece zone çizgisi çizilir.",
+        )
+
+    with settings_col2:
+        momentum_threshold_pct = st.number_input(
+            "Momentum threshold (%)",
+            min_value=0.0,
+            max_value=100.0,
+            value=35.0,
+            step=5.0,
+            help="Momentum = abs(close - open) / zone mesafesi. Varsayılan %35. Buffer hesaba dahil edilmez.",
+        )
+
+    with settings_col3:
+        ichimoku_rr_multiplier = st.number_input(
+            "1D Ichimoku TP multiplier (R)",
+            min_value=0.1,
+            max_value=10.0,
+            value=1.7,
+            step=0.1,
+            help="Ichimoku TP hesabında SL mesafesinin kaç katının hedef alınacağını belirler. Örn. 2.0 = 2R.",
+        )
+
+with st.expander("Gösterge açıklamaları", expanded=False):
     st.markdown(
         f"""
 - **EMA/SMA çizgileri:** Seçili hareketli ortalama çizgileri. Plotly legend'da sadece bunlar gösterilir.
 - **Zone çizgisi:** Siyah kesikli yatay çizgi.
 - **Zone buffer:** Zone çizgisinin altındaki/üstündeki hafif gri yatay bant.
-- **Normal momentum:** Gri dikey gölge.
+- **Normal momentum:** Gri/yeşilimsi dikey gölge.
 - **Counter momentum:** Kırmızı/pembe dikey gölge.
 - **LONG sinyal:** Yeşil yukarı üçgen.
 - **SHORT sinyal:** Kırmızı aşağı üçgen.
