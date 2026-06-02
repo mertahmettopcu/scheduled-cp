@@ -271,7 +271,7 @@ def _safe_round(value, digits=4):
 
 def add_ichimoku_signal_columns(
     df: pd.DataFrame,
-    ichimoku_rr_multiplier: float = 2.0,
+    ichimoku_rr_multiplier: float = 1.7,
 ) -> pd.DataFrame:
     out = df.copy().sort_values("open_time").reset_index(drop=True)
     rr_multiplier = max(float(ichimoku_rr_multiplier or 0), 0.0)
@@ -649,7 +649,7 @@ def add_momentum_highlights(
         fig.add_vrect(
             x0=display_time - half_delta,
             x1=display_time + half_delta,
-            fillcolor="rgba(180, 180, 180, 0.18)" if not is_counter else "rgba(255, 120, 120, 0.28)",
+            fillcolor="rgba(152, 255, 152, 0.18)" if not is_counter else "rgba(255, 120, 120, 0.28)",
             line_width=0,
             layer="below",
         )
@@ -1812,8 +1812,8 @@ ichimoku_rr_multiplier = st.number_input(
     "1D Ichimoku TP multiplier (R)",
     min_value=0.1,
     max_value=10.0,
-    value=2.0,
-    step=0.25,
+    value=1.7,
+    step=0.1,
     help="Ichimoku TP hesabında SL mesafesinin kaç katının hedef alınacağını belirler. Örn. 2.0 = 2R.",
 )
 
