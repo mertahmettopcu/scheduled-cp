@@ -271,7 +271,7 @@ def _safe_round(value, digits=4):
 
 def add_ichimoku_signal_columns(
     df: pd.DataFrame,
-    ichimoku_rr_multiplier: float = 2.0,
+    ichimoku_rr_multiplier: float = 1.7,
 ) -> pd.DataFrame:
     out = df.copy().sort_values("open_time").reset_index(drop=True)
     rr_multiplier = max(float(ichimoku_rr_multiplier or 0), 0.0)
