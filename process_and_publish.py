@@ -33,6 +33,7 @@ from core_utils import (
     signal_changed,
     upsert_in_chunks,
 )
+
 INPUT_FILE = Path("binance_data.json")
 STREAMLIT_APP_URL = os.getenv("STREAMLIT_APP_URL", "")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -45,6 +46,7 @@ def load_cached_raw_data() -> dict:
     if not INPUT_FILE.exists():
         raise SystemExit(f"Missing {INPUT_FILE}. Fetch stage must run before process stage.")
     return json.loads(INPUT_FILE.read_text(encoding="utf-8"))
+
 
 def fetch_open_ichimoku_trade_states(supabase, pair: str) -> List[Dict]:
     """
@@ -146,7 +148,8 @@ def update_ichimoku_trade_state(
 
     data = resp.data or []
     return data[0] if data else None
-    
+
+
 def _iso_from_ts(value) -> str:
     ts = pd.Timestamp(value)
 
@@ -154,6 +157,32 @@ def _iso_from_ts(value) -> str:
         ts = ts.tz_localize("UTC")
 
     return ts.tz_convert("UTC").isoformat().replace("+00:00", "Z")
+
+
+def get_closed_daily_ichimoku_df(df_1d_ichi: pd.DataFrame) -> pd.DataFrame:
+    """
+    Returns only fully closed 1D candles.
+
+    Binance can return the currently open daily candle as the last row.
+    Ichimoku lifecycle confirmation must use the latest CLOSED daily candle,
+    not the currently forming candle.
+    """
+    if df_1d_ichi.empty or "close_time" not in df_1d_ichi.columns:
+        return pd.DataFrame()
+
+    work = df_1d_ichi.copy()
+    work["close_time"] = pd.to_datetime(work["close_time"], errors="coerce", utc=True)
+
+    now_utc = pd.Timestamp.utcnow()
+    if now_utc.tzinfo is None:
+        now_utc = now_utc.tz_localize("UTC")
+
+    work = work[
+        work["close_time"].notna()
+        & (work["close_time"] <= now_utc)
+    ].copy()
+
+    return work.sort_values("open_time").reset_index(drop=True)
 
 
 def _state_is_opposite(state_signal: str | None, current_signal: str | None) -> bool:
@@ -248,11 +277,36 @@ def handle_pending_ichimoku_state(
     current_signal = normalize_signal(current_signal_1d)
 
     # Aynı sinyal mumunda confirmation kontrolü yapılmasın.
-    # Confirmation için en az bir sonraki daily mum kapanışı gerekir.
+    # Confirmation için en az bir sonraki daily mum gerekir.
     state_signal_time = pd.Timestamp(state["signal_time"])
     current_open_time = pd.Timestamp(latest_1d["open_time"])
 
+    if state_signal_time.tzinfo is None:
+        state_signal_time = state_signal_time.tz_localize("UTC")
+
+    if current_open_time.tzinfo is None:
+        current_open_time = current_open_time.tz_localize("UTC")
+
     if current_open_time <= state_signal_time:
+        return messages
+
+    # Kritik güvenlik:
+    # Confirmation / failed confirmation sadece gerçekten kapanmış daily mumla üretilecek.
+    current_close_time = pd.Timestamp(latest_1d["close_time"])
+
+    if current_close_time.tzinfo is None:
+        current_close_time = current_close_time.tz_localize("UTC")
+
+    now_utc = pd.Timestamp.utcnow()
+
+    if now_utc.tzinfo is None:
+        now_utc = now_utc.tz_localize("UTC")
+
+    if now_utc < current_close_time:
+        log(
+            f"  └─ Ichimoku pending confirmation waiting for daily close "
+            f"for {pair}: close_time={current_close_time.isoformat()}"
+        )
         return messages
 
     if current_signal == state_signal:
@@ -417,7 +471,7 @@ def handle_active_ichimoku_state(
         log(f"  └─ Ichimoku active state invalidated before TP for {pair}")
         return messages
 
-    # Opposite LONG/SHORT reversal closure. Yeni sinyal mesajı 4.4'te birleşik olarak üretilecek.
+    # Opposite LONG/SHORT reversal closure. Yeni sinyal mesajı aşağıda birleşik olarak üretilecek.
     if _state_is_opposite(state_signal, current_signal):
         if tp_already_hit:
             update_ichimoku_trade_state(
@@ -447,7 +501,8 @@ def handle_active_ichimoku_state(
         return messages
 
     return messages
-    
+
+
 def run() -> None:
     supabase = create_supabase_client_from_env()
     raw_payload = load_cached_raw_data()
@@ -507,11 +562,26 @@ def run() -> None:
 
         _, ichi_details = classify_ichimoku_signal(df_1d_ichi)
 
+        df_1d_ichi_lifecycle = get_closed_daily_ichimoku_df(df_1d_ichi)
+
+        if df_1d_ichi_lifecycle.empty:
+            log(f"  └─ Ichimoku lifecycle skipped for {pair}: no closed 1D candle")
+            latest_1d_lifecycle = latest_1d
+            current_signal_1d_lifecycle = normalize_signal(snap_1d["signal"])
+            candle_time_1d_lifecycle = snap_1d["last_open_time"]
+        else:
+            latest_1d_lifecycle = df_1d_ichi_lifecycle.iloc[-1]
+            current_signal_1d_lifecycle, _ = classify_ichimoku_signal(df_1d_ichi_lifecycle)
+            current_signal_1d_lifecycle = normalize_signal(current_signal_1d_lifecycle)
+            candle_time_1d_lifecycle = _iso_from_ts(latest_1d_lifecycle["open_time"])
+
         prev_signal_1h = prev_1h.get("signal") if prev_1h else None
         prev_signal_1d = prev_1d.get("signal") if prev_1d else None
 
-        current_signal_1d = normalize_signal(snap_1d["signal"])
+        current_signal_1d = current_signal_1d_lifecycle
         previous_signal_1d = normalize_signal(prev_signal_1d)
+
+        changed_1d_lifecycle = signal_changed(previous_signal_1d, current_signal_1d)
 
         notification_messages: List[str] = []
 
@@ -564,9 +634,9 @@ def run() -> None:
                         pair=pair,
                         state=latest_open_state,
                         current_signal_1d=current_signal_1d,
-                        latest_1d=latest_1d,
-                        df_1d_ichi=df_1d_ichi,
-                        candle_time_1d=snap_1d["last_open_time"],
+                        latest_1d=latest_1d_lifecycle,
+                        df_1d_ichi=df_1d_ichi_lifecycle,
+                        candle_time_1d=candle_time_1d_lifecycle,
                     )
                 )
 
@@ -581,8 +651,8 @@ def run() -> None:
                         pair=pair,
                         state=latest_open_state,
                         current_signal_1d=current_signal_1d,
-                        latest_1d=latest_1d,
-                        candle_time_1d=snap_1d["last_open_time"],
+                        latest_1d=latest_1d_lifecycle,
+                        candle_time_1d=candle_time_1d_lifecycle,
                     )
                 )
 
@@ -594,7 +664,7 @@ def run() -> None:
         # -------------------------------------------------
         new_directional_1d_signal = (
             has_previous_snapshot
-            and changed_1d
+            and changed_1d_lifecycle
             and current_signal_1d in {"LONG", "SHORT"}
         )
 
@@ -602,8 +672,8 @@ def run() -> None:
             payload = _build_trade_state_insert_payload(
                 pair=pair,
                 signal_type=current_signal_1d,
-                latest_1d=latest_1d,
-                df_1d_ichi=df_1d_ichi,
+                latest_1d=latest_1d_lifecycle,
+                df_1d_ichi=df_1d_ichi_lifecycle,
                 tp_multiplier=ICHIMOKU_TP_MULTIPLIER,
             )
 
@@ -622,8 +692,8 @@ def run() -> None:
                             previous_trade_state=previous_trade_for_reversal,
                             previous_signal=previous_signal_1d,
                             current_signal=current_signal_1d,
-                            df_1d_ichi=df_1d_ichi,
-                            candle_time_1d=snap_1d["last_open_time"],
+                            df_1d_ichi=df_1d_ichi_lifecycle,
+                            candle_time_1d=candle_time_1d_lifecycle,
                             streamlit_app_url=STREAMLIT_APP_URL,
                             tp_multiplier=ICHIMOKU_TP_MULTIPLIER,
                         )
@@ -634,8 +704,8 @@ def run() -> None:
                             pair=pair,
                             previous_signal=previous_signal_1d,
                             current_signal=current_signal_1d,
-                            df_1d_ichi=df_1d_ichi,
-                            candle_time_1d=snap_1d["last_open_time"],
+                            df_1d_ichi=df_1d_ichi_lifecycle,
+                            candle_time_1d=candle_time_1d_lifecycle,
                             streamlit_app_url=STREAMLIT_APP_URL,
                             tp_multiplier=ICHIMOKU_TP_MULTIPLIER,
                         )
@@ -655,7 +725,7 @@ def run() -> None:
 
         if (
             has_previous_snapshot
-            and changed_1d
+            and changed_1d_lifecycle
             and current_signal_1d == "NEUTRAL"
             and not produced_ichimoku_lifecycle_message
         ):
