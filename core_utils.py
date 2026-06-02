@@ -298,7 +298,547 @@ def classify_ichimoku_signal(df: pd.DataFrame) -> tuple[str, dict]:
         "future_cloud": f"Future cloud: {future_color}",
     }
     return signal, details
+    
+def format_price(value, digits: int = 4) -> str:
+    if value is None or pd.isna(value):
+        return "NA"
+    return f"{float(value):.{digits}f}"
 
+
+def signal_badge(sig: str) -> str:
+    sig = (sig or "").strip().upper()
+    if sig == "LONG":
+        return "🟢 LONG"
+    if sig == "SHORT":
+        return "🔴 SHORT"
+    return "⚪ NEUTRAL"
+
+
+def signal_display(current: str, previous: str | None, triggered: bool, suffix: str = "🔔") -> str:
+    current_text = signal_badge(current)
+    previous_norm = (previous or "").strip().upper()
+    current_norm = (current or "").strip().upper()
+
+    if triggered and previous_norm and previous_norm != current_norm:
+        return f"{signal_badge(previous_norm)} → {current_text} {suffix}"
+
+    return current_text
+
+
+def normalize_signal(sig: str | None) -> str:
+    sig = (sig or "").strip().upper()
+    if sig in {"LONG", "SHORT", "NEUTRAL"}:
+        return sig
+    return "NEUTRAL"
+
+
+def read_ichimoku_tp_multiplier(default: float = 1.7) -> float:
+    raw = os.getenv("ICHIMOKU_TP_MULTIPLIER")
+
+    if raw is None or str(raw).strip() == "":
+        return float(default)
+
+    try:
+        value = float(str(raw).strip())
+    except ValueError:
+        log(f"WARNING: Invalid ICHIMOKU_TP_MULTIPLIER={raw!r}. Falling back to {default}.")
+        return float(default)
+
+    if value <= 0:
+        log(f"WARNING: ICHIMOKU_TP_MULTIPLIER must be positive. Falling back to {default}.")
+        return float(default)
+
+    return value
+
+
+def get_ichimoku_condition_summary(df: pd.DataFrame) -> Dict:
+    if df.empty:
+        return {
+            "long_ok_count": 0,
+            "short_ok_count": 0,
+            "long_missing": ["not enough data"],
+            "short_missing": ["not enough data"],
+            "long_check": "0/4 OK — missing: not enough data",
+            "short_check": "0/4 OK — missing: not enough data",
+            "cloud_top": None,
+            "cloud_bottom": None,
+            "cloud_range_text": "NA",
+            "current_cloud_color": "unknown",
+            "future_cloud_color": "unknown",
+            "cloud_position": "unknown",
+        }
+
+    row = df.iloc[-1]
+
+    has_lag_ref = len(df) >= 27
+    if has_lag_ref:
+        ref = df.iloc[-27]
+        lagging_above = row["close"] > ref["high"]
+        lagging_below = row["close"] < ref["low"]
+    else:
+        lagging_above = False
+        lagging_below = False
+
+    tenkan_gt_kijun = row["tenkan"] > row["kijun"]
+    tenkan_lt_kijun = row["tenkan"] < row["kijun"]
+
+    a = row.get("senkou_a")
+    b = row.get("senkou_b")
+
+    if pd.isna(a) or pd.isna(b):
+        cloud_top = None
+        cloud_bottom = None
+        above_cloud = False
+        below_cloud = False
+        cloud_position = "unknown"
+        current_cloud_color = "unknown"
+    else:
+        cloud_top = max(float(a), float(b))
+        cloud_bottom = min(float(a), float(b))
+        close_ = float(row["close"])
+
+        above_cloud = close_ > cloud_top
+        below_cloud = close_ < cloud_bottom
+
+        if above_cloud:
+            cloud_position = "above cloud"
+        elif below_cloud:
+            cloud_position = "below cloud"
+        else:
+            cloud_position = "inside cloud"
+
+        if float(a) > float(b):
+            current_cloud_color = "green"
+        elif float(a) < float(b):
+            current_cloud_color = "red"
+        else:
+            current_cloud_color = "flat"
+
+    future_a = row.get("senkou_a_base")
+    future_b = row.get("senkou_b_base")
+
+    if pd.isna(future_a) or pd.isna(future_b):
+        future_green = False
+        future_red = False
+        future_cloud = "unknown"
+    else:
+        future_green = float(future_a) > float(future_b)
+        future_red = float(future_a) < float(future_b)
+        future_cloud = "green" if future_green else "red" if future_red else "flat"
+
+    long_conditions = {
+        "Lagging above 26D high": bool(lagging_above),
+        "Tenkan>Kijun": bool(tenkan_gt_kijun),
+        "Above cloud": bool(above_cloud),
+        "Future green": bool(future_green),
+    }
+
+    short_conditions = {
+        "Lagging below 26D low": bool(lagging_below),
+        "Tenkan<Kijun": bool(tenkan_lt_kijun),
+        "Below cloud": bool(below_cloud),
+        "Future red": bool(future_red),
+    }
+
+    long_ok_count = sum(long_conditions.values())
+    short_ok_count = sum(short_conditions.values())
+
+    long_missing = [name for name, ok in long_conditions.items() if not ok]
+    short_missing = [name for name, ok in short_conditions.items() if not ok]
+
+    long_check = f"{long_ok_count}/4 OK"
+    if long_missing:
+        long_check += " — missing: " + ", ".join(long_missing)
+
+    short_check = f"{short_ok_count}/4 OK"
+    if short_missing:
+        short_check += " — missing: " + ", ".join(short_missing)
+
+    cloud_range_text = (
+        f"{format_price(cloud_bottom)} - {format_price(cloud_top)}"
+        if cloud_top is not None and cloud_bottom is not None
+        else "NA"
+    )
+
+    return {
+        "long_ok_count": long_ok_count,
+        "short_ok_count": short_ok_count,
+        "long_missing": long_missing,
+        "short_missing": short_missing,
+        "long_check": long_check,
+        "short_check": short_check,
+        "cloud_top": cloud_top,
+        "cloud_bottom": cloud_bottom,
+        "cloud_range_text": cloud_range_text,
+        "current_cloud_color": current_cloud_color,
+        "future_cloud_color": future_cloud,
+        "cloud_position": cloud_position,
+    }
+
+
+def calculate_ichimoku_trade_plan(
+    df: pd.DataFrame,
+    signal_type: str,
+    tp_multiplier: float,
+) -> Dict:
+    signal_type = normalize_signal(signal_type)
+
+    if df.empty or signal_type not in {"LONG", "SHORT"}:
+        return {
+            "valid": False,
+            "entry_ref": None,
+            "sl_level": None,
+            "sl_distance": None,
+            "tp_multiplier": float(tp_multiplier),
+            "tp_level": None,
+            "cloud_top": None,
+            "cloud_bottom": None,
+            "reason": "no LONG/SHORT signal",
+        }
+
+    row = df.iloc[-1]
+    summary = get_ichimoku_condition_summary(df)
+
+    close_ = float(row["close"])
+    cloud_top = summary.get("cloud_top")
+    cloud_bottom = summary.get("cloud_bottom")
+
+    if cloud_top is None or cloud_bottom is None:
+        return {
+            "valid": False,
+            "entry_ref": close_,
+            "sl_level": None,
+            "sl_distance": None,
+            "tp_multiplier": float(tp_multiplier),
+            "tp_level": None,
+            "cloud_top": cloud_top,
+            "cloud_bottom": cloud_bottom,
+            "reason": "cloud boundary missing",
+        }
+
+    if signal_type == "LONG":
+        sl_level = float(cloud_bottom)
+        sl_distance = close_ - sl_level
+        tp_level = close_ + float(tp_multiplier) * sl_distance
+    else:
+        sl_level = float(cloud_top)
+        sl_distance = sl_level - close_
+        tp_level = close_ - float(tp_multiplier) * sl_distance
+
+    if sl_distance <= 0:
+        return {
+            "valid": False,
+            "entry_ref": close_,
+            "sl_level": sl_level,
+            "sl_distance": sl_distance,
+            "tp_multiplier": float(tp_multiplier),
+            "tp_level": None,
+            "cloud_top": cloud_top,
+            "cloud_bottom": cloud_bottom,
+            "reason": "invalid SL distance",
+        }
+
+    return {
+        "valid": True,
+        "entry_ref": close_,
+        "sl_level": sl_level,
+        "sl_distance": sl_distance,
+        "tp_multiplier": float(tp_multiplier),
+        "tp_level": tp_level,
+        "cloud_top": cloud_top,
+        "cloud_bottom": cloud_bottom,
+        "reason": "ok",
+    }
+
+
+def build_ichimoku_signal_summary_lines(
+    df: pd.DataFrame,
+    signal_type: str,
+    tp_multiplier: float,
+    include_trade_plan: bool = True,
+) -> List[str]:
+    signal_type = normalize_signal(signal_type)
+    summary = get_ichimoku_condition_summary(df)
+
+    lines = [
+        f"Close: {format_price(df.iloc[-1]['close']) if not df.empty else 'NA'}",
+        f"Cloud: {summary['cloud_range_text']}",
+        f"Cloud position: {summary['cloud_position']}",
+        f"LONG check: {summary['long_check']}",
+        f"SHORT check: {summary['short_check']}",
+    ]
+
+    if not include_trade_plan or signal_type == "NEUTRAL":
+        lines.append("TP/SL: none — no active 1D Ichimoku direction signal")
+        return lines
+
+    plan = calculate_ichimoku_trade_plan(df, signal_type, tp_multiplier)
+
+    if not plan["valid"]:
+        lines.append(f"TP/SL: unavailable — {plan['reason']}")
+        return lines
+
+    lines.extend([
+        f"Entry ref: {format_price(plan['entry_ref'])}",
+        f"SL: {format_price(plan['sl_level'])}",
+        f"Risk: {format_price(plan['sl_distance'])}",
+        f"TP {plan['tp_multiplier']:g}R: {format_price(plan['tp_level'])}",
+    ])
+
+    return lines
+
+
+def build_ichimoku_new_signal_message(
+    pair: str,
+    previous_signal: str | None,
+    current_signal: str,
+    df_1d_ichi: pd.DataFrame,
+    candle_time_1d: str,
+    streamlit_app_url: str,
+    tp_multiplier: float,
+) -> str:
+    current_signal = normalize_signal(current_signal)
+    previous_signal = normalize_signal(previous_signal)
+
+    app_link = _build_app_link(pair, streamlit_app_url)
+
+    lines = [
+        f"{pair}",
+        f"1d candle: {_format_candle_time_for_message(candle_time_1d)}",
+    ]
+
+    if app_link:
+        lines.append(f"Chart: {app_link}")
+
+    lines.extend([
+        "",
+        f"1d Ichimoku: {signal_display(current_signal, previous_signal, True)}",
+        "Event: New Ichimoku signal",
+        "",
+    ])
+
+    lines.extend(
+        build_ichimoku_signal_summary_lines(
+            df=df_1d_ichi,
+            signal_type=current_signal,
+            tp_multiplier=tp_multiplier,
+            include_trade_plan=True,
+        )
+    )
+
+    lines.extend([
+        f"TP status: waiting confirmation",
+        f"Confirmation rule: next 1D close must stay {signal_badge(current_signal)}",
+    ])
+
+    return "\n".join(lines)
+
+
+def build_ichimoku_tp_confirmed_message(
+    pair: str,
+    trade_state: Dict,
+    candle_time_1d: str,
+    streamlit_app_url: str,
+) -> str:
+    signal_type = normalize_signal(trade_state.get("signal_type"))
+    app_link = _build_app_link(pair, streamlit_app_url)
+
+    lines = [
+        f"{pair}",
+        f"1d candle: {_format_candle_time_for_message(candle_time_1d)}",
+    ]
+
+    if app_link:
+        lines.append(f"Chart: {app_link}")
+
+    lines.extend([
+        "",
+        f"1d Ichimoku: {signal_badge(signal_type)} → {signal_badge(signal_type)} ✅",
+        "Event: TP confirmed",
+        "",
+        f"Original signal: {signal_badge(signal_type)}",
+        f"Signal candle: {_format_candle_time_for_message(trade_state.get('signal_time'))}",
+        f"Entry ref: {format_price(trade_state.get('entry_ref'))}",
+        f"SL: {format_price(trade_state.get('sl_level'))}",
+        f"Risk: {format_price(trade_state.get('sl_distance'))}",
+        f"TP {format_price(trade_state.get('tp_multiplier'), digits=2)}R: {format_price(trade_state.get('tp_level'))}",
+        "TP status: active",
+    ])
+
+    return "\n".join(lines)
+
+
+def build_ichimoku_confirmation_failed_message(
+    pair: str,
+    trade_state: Dict,
+    current_signal: str,
+    df_1d_ichi: pd.DataFrame,
+    candle_time_1d: str,
+    streamlit_app_url: str,
+    tp_multiplier: float,
+) -> str:
+    previous_signal = normalize_signal(trade_state.get("signal_type"))
+    current_signal = normalize_signal(current_signal)
+    app_link = _build_app_link(pair, streamlit_app_url)
+
+    lines = [
+        f"{pair}",
+        f"1d candle: {_format_candle_time_for_message(candle_time_1d)}",
+    ]
+
+    if app_link:
+        lines.append(f"Chart: {app_link}")
+
+    lines.extend([
+        "",
+        f"1d Ichimoku: {signal_badge(previous_signal)} → {signal_badge(current_signal)} ⚠️",
+        "Event: TP confirmation failed",
+        "",
+        f"Previous pending signal: {signal_badge(previous_signal)}",
+        "TP status: not activated",
+        f"Reason: next 1D close did not stay {signal_badge(previous_signal)}",
+        "",
+    ])
+
+    lines.extend(
+        build_ichimoku_signal_summary_lines(
+            df=df_1d_ichi,
+            signal_type=current_signal,
+            tp_multiplier=tp_multiplier,
+            include_trade_plan=False,
+        )
+    )
+
+    return "\n".join(lines)
+
+
+def build_ichimoku_tp_hit_message(
+    pair: str,
+    trade_state: Dict,
+    candle_time_1d: str,
+    streamlit_app_url: str,
+) -> str:
+    signal_type = normalize_signal(trade_state.get("signal_type"))
+    app_link = _build_app_link(pair, streamlit_app_url)
+
+    lines = [
+        f"{pair}",
+        f"1d candle: {_format_candle_time_for_message(candle_time_1d)}",
+    ]
+
+    if app_link:
+        lines.append(f"Chart: {app_link}")
+
+    lines.extend([
+        "",
+        f"1d Ichimoku: {signal_badge(signal_type)} 🎯",
+        "Event: TP hit",
+        "",
+        f"Signal: {signal_badge(signal_type)}",
+        f"Signal candle: {_format_candle_time_for_message(trade_state.get('signal_time'))}",
+        f"Entry ref: {format_price(trade_state.get('entry_ref'))}",
+        f"TP {format_price(trade_state.get('tp_multiplier'), digits=2)}R: {format_price(trade_state.get('tp_level'))}",
+        f"Hit candle: {_format_candle_time_for_message(trade_state.get('tp_hit_time') or candle_time_1d)}",
+        "Status: target reached",
+    ])
+
+    return "\n".join(lines)
+
+
+def build_ichimoku_state_closed_message(
+    pair: str,
+    trade_state: Dict,
+    current_signal: str,
+    candle_time_1d: str,
+    streamlit_app_url: str,
+    event_title: str,
+    note: str,
+    suffix: str = "⚠️",
+) -> str:
+    previous_signal = normalize_signal(trade_state.get("signal_type"))
+    current_signal = normalize_signal(current_signal)
+    app_link = _build_app_link(pair, streamlit_app_url)
+
+    lines = [
+        f"{pair}",
+        f"1d candle: {_format_candle_time_for_message(candle_time_1d)}",
+    ]
+
+    if app_link:
+        lines.append(f"Chart: {app_link}")
+
+    lines.extend([
+        "",
+        f"1d Ichimoku: {signal_badge(previous_signal)} → {signal_badge(current_signal)} {suffix}",
+        f"Event: {event_title}",
+        "",
+        f"Previous active signal: {signal_badge(previous_signal)}",
+        f"TP level: {format_price(trade_state.get('tp_level'))}",
+        f"TP hit candle: {_format_candle_time_for_message(trade_state.get('tp_hit_time')) if trade_state.get('tp_hit_time') else 'NA'}",
+        f"Note: {note}",
+    ])
+
+    return "\n".join(lines)
+
+
+def build_ichimoku_reversal_message(
+    pair: str,
+    previous_trade_state: Dict | None,
+    previous_signal: str | None,
+    current_signal: str,
+    df_1d_ichi: pd.DataFrame,
+    candle_time_1d: str,
+    streamlit_app_url: str,
+    tp_multiplier: float,
+) -> str:
+    previous_signal = normalize_signal(previous_signal)
+    current_signal = normalize_signal(current_signal)
+    app_link = _build_app_link(pair, streamlit_app_url)
+
+    lines = [
+        f"{pair}",
+        f"1d candle: {_format_candle_time_for_message(candle_time_1d)}",
+    ]
+
+    if app_link:
+        lines.append(f"Chart: {app_link}")
+
+    lines.extend([
+        "",
+        f"1d Ichimoku: {signal_badge(previous_signal)} → {signal_badge(current_signal)} 🔁",
+        "Event: Ichimoku direction changed",
+        "",
+    ])
+
+    if previous_trade_state:
+        previous_tp_hit = bool(previous_trade_state.get("tp_hit_time"))
+        previous_tp_status = "already hit" if previous_tp_hit else "not hit / not confirmed"
+        lines.extend([
+            f"Previous {previous_signal}:",
+            f"Previous TP status: {previous_tp_status}",
+            f"Previous TP: {format_price(previous_trade_state.get('tp_level'))}",
+            "",
+        ])
+
+    lines.extend([
+        f"New {current_signal}:",
+    ])
+
+    lines.extend(
+        build_ichimoku_signal_summary_lines(
+            df=df_1d_ichi,
+            signal_type=current_signal,
+            tp_multiplier=tp_multiplier,
+            include_trade_plan=True,
+        )
+    )
+
+    lines.extend([
+        "TP status: waiting confirmation",
+        f"Confirmation rule: next 1D close must stay {signal_badge(current_signal)}",
+    ])
+
+    return "\n".join(lines)
 
 def build_telegram_message(
     pair: str,
@@ -320,30 +860,7 @@ def build_telegram_message(
     triggered_1d: bool = False,
 ) -> str:
     def fmt(x):
-        if pd.isna(x):
-            return "NA"
-        return f"{x:.4f}"
-
-    def sig_label(sig: str, triggered: bool) -> str:
-        return f"{sig} (triggered)" if triggered else sig
-    
-    def signal_badge(sig: str) -> str:
-        sig = (sig or "").strip().upper()
-        if sig == "LONG":
-            return "🟢 LONG"
-        if sig == "SHORT":
-            return "🔴 SHORT"
-        return "⚪ NEUTRAL"
-
-    def signal_display(current: str, previous: str | None, triggered: bool) -> str:
-        current_text = signal_badge(current)
-        previous_norm = (previous or "").strip().upper()
-        current_norm = (current or "").strip().upper()
-
-        if triggered and previous_norm and previous_norm != current_norm:
-            return f"{signal_badge(previous_norm)} → {current_text} 🔔"
-
-        return current_text
+        return format_price(x)
         
     app_link = _build_app_link(pair, streamlit_app_url)
 
