@@ -1,0 +1,44 @@
+name: Seed Ichimoku State
+
+on:
+  workflow_dispatch:
+    inputs:
+      pair:
+        description: "Pair to seed"
+        required: true
+        default: "BTCUSDT"
+      max_signal_age_days:
+        description: "Abort if latest closed 1D Ichimoku signal is older than this many days"
+        required: true
+        default: "3"
+
+jobs:
+  seed-ichimoku-state:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install requests pandas numpy supabase python-dotenv httpx
+          fi
+
+      - name: Seed latest Ichimoku signal
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          ICHIMOKU_TP_MULTIPLIER: ${{ secrets.ICHIMOKU_TP_MULTIPLIER }}
+          SEED_PAIR: ${{ github.event.inputs.pair }}
+          SEED_MAX_SIGNAL_AGE_DAYS: ${{ github.event.inputs.max_signal_age_days }}
+        run: python seed_latest_ichimoku_signal.py
