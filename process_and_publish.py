@@ -497,31 +497,46 @@ def run() -> None:
 
         log(f"  └─ Signal state checked for {pair}")
 
-        should_send = (prev_15m is not None or prev_1h is not None or prev_1d is not None) and (
-            changed_1h or changed_1d
+        df_15m_feat = add_ema_rsi_features(pair_dfs["15m"])
+        df_1h_feat = add_ema_rsi_features(pair_dfs["1h"])
+        df_1d_ichi = add_ichimoku(pair_dfs["1d"])
+
+        latest_15m = df_15m_feat.iloc[-1]
+        latest_1h = df_1h_feat.iloc[-1]
+        latest_1d = df_1d_ichi.iloc[-1]
+
+        _, ichi_details = classify_ichimoku_signal(df_1d_ichi)
+
+        prev_signal_1h = prev_1h.get("signal") if prev_1h else None
+        prev_signal_1d = prev_1d.get("signal") if prev_1d else None
+
+        current_signal_1d = normalize_signal(snap_1d["signal"])
+        previous_signal_1d = normalize_signal(prev_signal_1d)
+
+        notification_messages: List[str] = []
+
+        has_previous_snapshot = (
+            prev_15m is not None
+            or prev_1h is not None
+            or prev_1d is not None
         )
 
-        if should_send:
-            df_15m_feat = add_ema_rsi_features(pair_dfs["15m"])
-            df_1h_feat = add_ema_rsi_features(pair_dfs["1h"])
-            df_1d_ichi = add_ichimoku(pair_dfs["1d"])
-
-            latest_15m = df_15m_feat.iloc[-1]
-            latest_1h = df_1h_feat.iloc[-1]
-            latest_1d = df_1d_ichi.iloc[-1]
-
-            _, ichi_details = classify_ichimoku_signal(df_1d_ichi)
-
-            message = build_telegram_message(
+        # -------------------------------------------------
+        # 1H legacy notification
+        # -------------------------------------------------
+        # 1H tarafını şimdilik eski genel mesaj formatıyla koruyoruz.
+        # 1D değişimi için özel Ichimoku lifecycle mesajları aşağıda üretilecek.
+        if has_previous_snapshot and changed_1h:
+            legacy_1h_message = build_telegram_message(
                 pair=pair,
                 row_15m=latest_15m,
                 signal_15m=snap_15m["signal"],
                 row_1h=latest_1h,
                 signal_1h=snap_1h["signal"],
-                prev_signal_1h=prev_1h.get("signal") if prev_1h else None,
+                prev_signal_1h=prev_signal_1h,
                 row_1d=latest_1d,
                 signal_1d=snap_1d["signal"],
-                prev_signal_1d=prev_1d.get("signal") if prev_1d else None,
+                prev_signal_1d=prev_signal_1d,
                 ichi_details=ichi_details,
                 candle_time_15m=snap_15m["last_open_time"],
                 candle_time_1h=snap_1h["last_open_time"],
@@ -529,12 +544,148 @@ def run() -> None:
                 streamlit_app_url=STREAMLIT_APP_URL,
                 triggered_15m=False,
                 triggered_1h=changed_1h,
-                triggered_1d=changed_1d,
+                triggered_1d=False,
             )
-            send_telegram_message(message, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_IDS)
-            log(f"  └─ 📨 Notification sent for {pair}")
+            notification_messages.append(legacy_1h_message)
+
+        # -------------------------------------------------
+        # 1D Ichimoku lifecycle
+        # -------------------------------------------------
+        latest_open_state = get_latest_open_ichimoku_trade_state(supabase, pair)
+        previous_trade_for_reversal = latest_open_state
+
+        if latest_open_state:
+            state_status = str(latest_open_state.get("status") or "").upper()
+
+            if state_status == "PENDING_CONFIRMATION":
+                notification_messages.extend(
+                    handle_pending_ichimoku_state(
+                        supabase,
+                        pair=pair,
+                        state=latest_open_state,
+                        current_signal_1d=current_signal_1d,
+                        latest_1d=latest_1d,
+                        df_1d_ichi=df_1d_ichi,
+                        candle_time_1d=snap_1d["last_open_time"],
+                    )
+                )
+
+                # State güncellenmiş olabilir; yeni sinyal kontrolü için tekrar oku.
+                latest_open_state = get_latest_open_ichimoku_trade_state(supabase, pair)
+                previous_trade_for_reversal = previous_trade_for_reversal or latest_open_state
+
+            elif state_status in {"ACTIVE", "TP_HIT"}:
+                notification_messages.extend(
+                    handle_active_ichimoku_state(
+                        supabase,
+                        pair=pair,
+                        state=latest_open_state,
+                        current_signal_1d=current_signal_1d,
+                        latest_1d=latest_1d,
+                        candle_time_1d=snap_1d["last_open_time"],
+                    )
+                )
+
+                # State güncellenmiş olabilir; yeni sinyal kontrolü için tekrar oku.
+                latest_open_state = get_latest_open_ichimoku_trade_state(supabase, pair)
+
+        # -------------------------------------------------
+        # New 1D Ichimoku LONG/SHORT signal
+        # -------------------------------------------------
+        new_directional_1d_signal = (
+            has_previous_snapshot
+            and changed_1d
+            and current_signal_1d in {"LONG", "SHORT"}
+        )
+
+        if new_directional_1d_signal:
+            payload = _build_trade_state_insert_payload(
+                pair=pair,
+                signal_type=current_signal_1d,
+                latest_1d=latest_1d,
+                df_1d_ichi=df_1d_ichi,
+                tp_multiplier=ICHIMOKU_TP_MULTIPLIER,
+            )
+
+            if payload is not None:
+                inserted_state = insert_ichimoku_trade_state(
+                    supabase,
+                    **payload,
+                )
+
+                # Eğer zıt yöne geçiş varsa birleşik reversal mesajı gönder.
+                # Yoksa normal new signal mesajı gönder.
+                if previous_signal_1d in {"LONG", "SHORT"} and previous_signal_1d != current_signal_1d:
+                    notification_messages.append(
+                        build_ichimoku_reversal_message(
+                            pair=pair,
+                            previous_trade_state=previous_trade_for_reversal,
+                            previous_signal=previous_signal_1d,
+                            current_signal=current_signal_1d,
+                            df_1d_ichi=df_1d_ichi,
+                            candle_time_1d=snap_1d["last_open_time"],
+                            streamlit_app_url=STREAMLIT_APP_URL,
+                            tp_multiplier=ICHIMOKU_TP_MULTIPLIER,
+                        )
+                    )
+                else:
+                    notification_messages.append(
+                        build_ichimoku_new_signal_message(
+                            pair=pair,
+                            previous_signal=previous_signal_1d,
+                            current_signal=current_signal_1d,
+                            df_1d_ichi=df_1d_ichi,
+                            candle_time_1d=snap_1d["last_open_time"],
+                            streamlit_app_url=STREAMLIT_APP_URL,
+                            tp_multiplier=ICHIMOKU_TP_MULTIPLIER,
+                        )
+                    )
+
+                log(f"  └─ Ichimoku new {current_signal_1d} state stored for {pair}")
+
+        # -------------------------------------------------
+        # 1D neutral fallback message
+        # -------------------------------------------------
+        # Eğer 1D sinyal NEUTRAL'a döndüyse ama yukarıdaki lifecycle
+        # özel mesajlarından biri üretilmediyse, eski genel mesajı gönder.
+        # Bu nadir olur; çoğu NEUTRAL dönüşü confirmation failed veya invalidated olarak yakalanır.
+        produced_ichimoku_lifecycle_message = any(
+            "1d Ichimoku:" in msg for msg in notification_messages
+        )
+
+        if (
+            has_previous_snapshot
+            and changed_1d
+            and current_signal_1d == "NEUTRAL"
+            and not produced_ichimoku_lifecycle_message
+        ):
+            neutral_message = build_telegram_message(
+                pair=pair,
+                row_15m=latest_15m,
+                signal_15m=snap_15m["signal"],
+                row_1h=latest_1h,
+                signal_1h=snap_1h["signal"],
+                prev_signal_1h=prev_signal_1h,
+                row_1d=latest_1d,
+                signal_1d=snap_1d["signal"],
+                prev_signal_1d=prev_signal_1d,
+                ichi_details=ichi_details,
+                candle_time_15m=snap_15m["last_open_time"],
+                candle_time_1h=snap_1h["last_open_time"],
+                candle_time_1d=snap_1d["last_open_time"],
+                streamlit_app_url=STREAMLIT_APP_URL,
+                triggered_15m=False,
+                triggered_1h=False,
+                triggered_1d=True,
+            )
+            notification_messages.append(neutral_message)
+
+        if notification_messages:
+            for message in notification_messages:
+                send_telegram_message(message, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_IDS)
+            log(f"  └─ 📨 {len(notification_messages)} notification(s) sent for {pair}")
         else:
-            log(f"  └─ Notification skipped for {pair} (no new signal)")
+            log(f"  └─ Notification skipped for {pair} (no new event)")
 
     if not candle_rows:
         raise SystemExit("No candle rows prepared; nothing to upsert.")
