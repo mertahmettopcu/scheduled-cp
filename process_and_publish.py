@@ -11,7 +11,14 @@ import pandas as pd
 from core_utils import (
     add_ema_rsi_features,
     add_ichimoku,
+    build_ichimoku_confirmation_failed_message,
+    build_ichimoku_new_signal_message,
+    build_ichimoku_reversal_message,
+    build_ichimoku_state_closed_message,
+    build_ichimoku_tp_confirmed_message,
+    build_ichimoku_tp_hit_message,
     build_telegram_message,
+    calculate_ichimoku_trade_plan,
     candles_to_records,
     classify_ichimoku_signal,
     create_supabase_client_from_env,
@@ -20,16 +27,18 @@ from core_utils import (
     latest_daily_ichimoku_snapshot,
     latest_strategy_snapshot,
     log,
+    normalize_signal,
+    read_ichimoku_tp_multiplier,
     send_telegram_message,
     signal_changed,
     upsert_in_chunks,
 )
-
 INPUT_FILE = Path("binance_data.json")
 STREAMLIT_APP_URL = os.getenv("STREAMLIT_APP_URL", "")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_IDS_RAW = os.getenv("TELEGRAM_CHAT_IDS", "")
 TELEGRAM_CHAT_IDS = [x.strip() for x in TELEGRAM_CHAT_IDS_RAW.split(",") if x.strip()]
+ICHIMOKU_TP_MULTIPLIER = read_ichimoku_tp_multiplier(default=1.7)
 
 
 def load_cached_raw_data() -> dict:
