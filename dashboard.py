@@ -288,7 +288,7 @@ def _safe_round(value, digits=4):
 
 def add_ichimoku_signal_columns(
     df: pd.DataFrame,
-    ichimoku_rr_multiplier: float = 1.7,
+    ichimoku_rr_multiplier: float = 2.0,
 ) -> pd.DataFrame:
     out = df.copy().sort_values("open_time").reset_index(drop=True)
     rr_multiplier = max(float(ichimoku_rr_multiplier or 0), 0.0)
@@ -613,23 +613,44 @@ def add_momentum_highlights(
     if not show_momentum or chart_df.empty or zones is None or zones.empty:
         return fig
 
-    work = add_hover_zone_context(
-        chart_df=chart_df,
-        zones=zones,
-        zone_buffer=0.0,
-    )
-
+    work = chart_df.copy()
     work = add_signal_reference_state(work, marker_df)
 
     if work.empty:
         return fig
 
-    threshold = max(float(momentum_threshold_pct or 0), 0.0) / 100.0
-    offset = _chart_price_offset(work, ratio=0.018)
+    zone_work = zones.copy()
+    zone_work["zone_value"] = pd.to_numeric(zone_work["zone_value"], errors="coerce")
+    zone_values = (
+        zone_work["zone_value"]
+        .dropna()
+        .drop_duplicates()
+        .sort_values(ascending=False)
+        .tolist()
+    )
 
-    for i, row in work.iterrows():
-        upper_zone = row.get("hover_upper_zone")
-        lower_zone = row.get("hover_lower_zone")
+    if not zone_values:
+        return fig
+
+    def _opening_zone_context(open_price):
+        if pd.isna(open_price):
+            return pd.NA, pd.NA
+
+        open_price = float(open_price)
+        upper_candidates = [z for z in zone_values if z > open_price]
+        lower_candidates = [z for z in zone_values if z < open_price]
+
+        upper_zone = min(upper_candidates) if upper_candidates else pd.NA
+        lower_zone = max(lower_candidates) if lower_candidates else pd.NA
+
+        return upper_zone, lower_zone
+
+    threshold = max(float(momentum_threshold_pct or 0), 0.0) / 100.0
+
+    for _, row in work.iterrows():
+        # Momentum eşiği, mumun kapanış fiyatına göre değil,
+        # mumun OPEN fiyatının bulunduğu zone aralığına göre hesaplanır.
+        upper_zone, lower_zone = _opening_zone_context(row.get("open"))
 
         if pd.isna(upper_zone) or pd.isna(lower_zone):
             continue
@@ -660,9 +681,9 @@ def add_momentum_highlights(
             candle_delta = work["display_time"].sort_values().diff().dropna().median()
         else:
             candle_delta = pd.Timedelta(minutes=15)
-        
+
         half_delta = candle_delta / 2
-        
+
         fig.add_vrect(
             x0=display_time - half_delta,
             x1=display_time + half_delta,
@@ -670,8 +691,6 @@ def add_momentum_highlights(
             line_width=0,
             layer="below",
         )
-
-
 
     return fig
 
@@ -1848,7 +1867,7 @@ with st.expander("Grafik ayarları", expanded=False):
             max_value=100.0,
             value=35.0,
             step=5.0,
-            help="Momentum = abs(close - open) / zone mesafesi. Varsayılan %35. Buffer hesaba dahil edilmez.",
+            help="Momentum = abs(close - open) / mumun open fiyatının bulunduğu zone mesafesi. Varsayılan %35. Buffer hesaba dahil edilmez.",
         )
 
     with settings_col3:
@@ -1869,6 +1888,7 @@ with st.expander("Gösterge açıklamaları", expanded=False):
 - **Zone buffer:** Zone çizgisinin altındaki/üstündeki hafif gri yatay bant.
 - **Normal momentum:** Gri/yeşilimsi dikey gölge.
 - **Counter momentum:** Kırmızı/pembe dikey gölge.
+- **Momentum hesabı:** `abs(close - open)`, mumun **open** fiyatının bulunduğu iki manual zone arasındaki mesafeye göre ölçülür. Buffer hesaba dahil edilmez.
 - **LONG sinyal:** Yeşil yukarı üçgen.
 - **SHORT sinyal:** Kırmızı aşağı üçgen.
 - **15M sinyal referansı:** 15M'in kendi sinyali değildir; 1H sinyalinin 15M içi referans noktasıdır.
