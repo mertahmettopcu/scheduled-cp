@@ -1511,11 +1511,11 @@ def make_price_ema_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | Non
         showlegend=False,
         customdata=plot_df[
             [
-                "ema168",
-                "ema168_adjust_false",
-                "ema168_adjust_true",
+                "sma4",
+                "sma16",
+                "sma65",
+                "sma120",
                 "sma168",
-                "ema168_sma_seed",
                 "hover_upper_zone",
                 "hover_lower_zone",
                 "hover_upper_zone_minus_buffer",
@@ -1529,11 +1529,11 @@ def make_price_ema_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | Non
             "Low: %{low}<br>"
             "Close: %{close}<br>"
             "<br>"
-            "EMA168 current: %{customdata[0]:.4f}<br>"
-            "EMA168 adjust_false: %{customdata[1]:.4f}<br>"
-            "EMA168 adjust_true: %{customdata[2]:.4f}<br>"
-            "SMA168: %{customdata[3]:.4f}<br>"
-            "EMA168 SMA seed: %{customdata[4]:.4f}<br>"
+            "SMA4: %{customdata[0]:.4f}<br>"
+            "SMA16: %{customdata[1]:.4f}<br>"
+            "SMA65: %{customdata[2]:.4f}<br>"
+            "SMA120: %{customdata[3]:.4f}<br>"
+            "SMA168: %{customdata[4]:.4f}<br>"
             "<br>"
             "Open-based Manual Zone Range:<br>"
             "Upper Zone: %{customdata[5]:.2f}<br>"
@@ -1840,7 +1840,7 @@ with top_col2:
         ["EMA", "SMA", "EMA + SMA"],
         index=1,
         horizontal=True,
-        help="Bu seçim sadece grafikte çizilen ortalamaları değiştirir. Pipeline sinyali SMA4/SMA16 + RSI filtrelerine göre üretilir.",
+        help="Bu seçim sadece grafikte çizilen ortalamaları değiştirir. Pipeline sinyali, snapshot ve hover değerleri SMA bazlıdır.",
     )
 
 with st.expander("Grafik ayarları", expanded=False):
@@ -1878,7 +1878,7 @@ with st.expander("Grafik ayarları", expanded=False):
 with st.expander("Gösterge açıklamaları", expanded=False):
     st.markdown(
         f"""
-- **EMA/SMA çizgileri:** Seçili hareketli ortalama çizgileri. Plotly legend'da sadece bunlar gösterilir.
+- **SMA çizgileri:** Hover ve snapshot tablosunda artık SMA değerleri gösterilir. Grafik çiziminde üstteki EMA/SMA seçimi yalnızca çizilen ortalamaları değiştirir.
 - **Zone çizgisi:** Siyah kesikli yatay çizgi.
 - **Zone buffer:** Zone çizgisinin altındaki/üstündeki hafif gri yatay bant.
 - **Normal momentum:** Gri/yeşilimsi dikey gölge.
@@ -1981,17 +1981,9 @@ if not snapshots.empty:
         "close",
         "sma4",
         "sma16",
-        "ema4",
-        "ema16",
-        "ema65",
-        "ema120",
-        "ema168",
-        "ema168_adjust_false",
-        "ema168_adjust_true",
+        "sma65",
+        "sma120",
         "sma168",
-        "ema168_sma_seed",
-        "ema_calc_candle_count",
-        "ema_calc_first_open_time",
         "rsi14",
         "rsi52",
         "signal",
