@@ -110,13 +110,6 @@ def load_pair_options() -> list[str]:
 
     return pair_options
     
-params = st.query_params
-
-if params.get("ping") == st.secrets["access"]["keepalive_token"]:
-    st.write("ok")
-    st.stop()
-    
-
 # =========================================================
 # Config / Supabase
 # =========================================================
@@ -288,7 +281,7 @@ def _safe_round(value, digits=4):
 
 def add_ichimoku_signal_columns(
     df: pd.DataFrame,
-    ichimoku_rr_multiplier: float = 2.0,
+    ichimoku_rr_multiplier: float = 1.7,
 ) -> pd.DataFrame:
     out = df.copy().sort_values("open_time").reset_index(drop=True)
     rr_multiplier = max(float(ichimoku_rr_multiplier or 0), 0.0)
@@ -951,7 +944,9 @@ def add_hover_zone_context(
     # Böylece customdata tarafında duplicate kolon hatası oluşmaz.
     out = out.drop(columns=[col for col in hover_cols if col in out.columns], errors="ignore")
 
-    if zones is None or zones.empty or "close" not in out.columns:
+    # Hover zone range close'a göre değil, mumun OPEN fiyatına göre hesaplanır.
+    # Bu, momentum hesabındaki referans zone mesafesiyle aynı mantığı kullanır.
+    if zones is None or zones.empty or "open" not in out.columns:
         for col in hover_cols:
             out[col] = pd.NA
         return out
@@ -973,8 +968,8 @@ def add_hover_zone_context(
 
     buffer_value = max(float(zone_buffer or 0), 0.0)
 
-    def _zone_context(close_price):
-        if pd.isna(close_price):
+    def _zone_context(open_price):
+        if pd.isna(open_price):
             return pd.Series(
                 {
                     "hover_upper_zone": pd.NA,
@@ -984,10 +979,10 @@ def add_hover_zone_context(
                 }
             )
 
-        close_price = float(close_price)
+        open_price = float(open_price)
 
-        upper_candidates = [z for z in zone_values if z > close_price]
-        lower_candidates = [z for z in zone_values if z < close_price]
+        upper_candidates = [z for z in zone_values if z > open_price]
+        lower_candidates = [z for z in zone_values if z < open_price]
 
         upper_zone = min(upper_candidates) if upper_candidates else pd.NA
         lower_zone = max(lower_candidates) if lower_candidates else pd.NA
@@ -1013,7 +1008,7 @@ def add_hover_zone_context(
             }
         )
 
-    zone_context = out["close"].apply(_zone_context)
+    zone_context = out["open"].apply(_zone_context)
 
     out = pd.concat([out, zone_context], axis=1)
 
@@ -1540,7 +1535,7 @@ def make_price_ema_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | Non
             "SMA168: %{customdata[3]:.4f}<br>"
             "EMA168 SMA seed: %{customdata[4]:.4f}<br>"
             "<br>"
-            "Manual Zone Range:<br>"
+            "Open-based Manual Zone Range:<br>"
             "Upper Zone: %{customdata[5]:.2f}<br>"
             "Lower Zone: %{customdata[6]:.2f}<br>"
             "Upper Zone - Buffer: %{customdata[7]:.2f}<br>"
@@ -1598,7 +1593,7 @@ def make_price_ema_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | Non
         momentum_threshold_pct=momentum_threshold_pct,
     )
     fig.update_layout(
-        title=None,
+        title="",
         xaxis_title="Time",
         yaxis_title="Price",
         xaxis_rangeslider_visible=False,
@@ -1671,7 +1666,7 @@ def make_ichimoku_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | None
                         "Low: %{low}<br>"
                         "Close: %{close}<br>"
                         "<br>"
-                        "Manual Zone Range:<br>"
+                        "Open-based Manual Zone Range:<br>"
                         "Upper Zone: %{customdata[0]:.2f}<br>"
                         "Lower Zone: %{customdata[1]:.2f}<br>"
                         "Upper Zone - Buffer: %{customdata[2]:.2f}<br>"
@@ -1798,7 +1793,7 @@ def make_ichimoku_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | None
     x_max = plot_df["display_time"].max() + pd.Timedelta(days=26)
 
     fig.update_layout(
-        title=None,
+        title="",
         xaxis_title="Date",
         yaxis_title="Price",
         xaxis_rangeslider_visible=False,
