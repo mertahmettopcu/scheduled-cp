@@ -1511,11 +1511,6 @@ def make_price_ema_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | Non
         showlegend=False,
         customdata=plot_df[
             [
-                "sma4",
-                "sma16",
-                "sma65",
-                "sma120",
-                "sma168",
                 "hover_upper_zone",
                 "hover_lower_zone",
                 "hover_upper_zone_minus_buffer",
@@ -1529,17 +1524,11 @@ def make_price_ema_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | Non
             "Low: %{low}<br>"
             "Close: %{close}<br>"
             "<br>"
-            "SMA4: %{customdata[0]:.4f}<br>"
-            "SMA16: %{customdata[1]:.4f}<br>"
-            "SMA65: %{customdata[2]:.4f}<br>"
-            "SMA120: %{customdata[3]:.4f}<br>"
-            "SMA168: %{customdata[4]:.4f}<br>"
-            "<br>"
             "Open-based Manual Zone Range:<br>"
-            "Upper Zone: %{customdata[5]:.2f}<br>"
-            "Lower Zone: %{customdata[6]:.2f}<br>"
-            "Upper Zone - Buffer: %{customdata[7]:.2f}<br>"
-            "Lower Zone + Buffer: %{customdata[8]:.2f}<br>"
+            "Upper Zone: %{customdata[0]:.2f}<br>"
+            "Lower Zone: %{customdata[1]:.2f}<br>"
+            "Upper Zone - Buffer: %{customdata[2]:.2f}<br>"
+            "Lower Zone + Buffer: %{customdata[3]:.2f}<br>"
             "<extra></extra>"
         ),
     )
@@ -1567,7 +1556,7 @@ def make_price_ema_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | Non
                     y=plot_df[f"sma{length}"],
                     mode="lines",
                     name=f"SMA{length}",
-                    hoverinfo="skip",
+                    hovertemplate=f"SMA{length}: %{{y:.4f}}<extra></extra>",
                 )
             )
             
