@@ -1555,6 +1555,7 @@ def make_price_ema_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | Non
                     y=plot_df[f"ema{length}"],
                     mode="lines",
                     name=f"EMA{length}",
+                    hoverinfo="skip",
                 )
             )
     
@@ -1566,6 +1567,7 @@ def make_price_ema_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | Non
                     y=plot_df[f"sma{length}"],
                     mode="lines",
                     name=f"SMA{length}",
+                    hoverinfo="skip",
                 )
             )
             
@@ -1840,7 +1842,7 @@ with top_col2:
         ["EMA", "SMA", "EMA + SMA"],
         index=1,
         horizontal=True,
-        help="Bu seçim sadece grafikte çizilen ortalamaları değiştirir. Pipeline sinyali, snapshot ve hover değerleri SMA bazlıdır.",
+        help="Bu seçim sadece grafikte çizilen ortalamaları değiştirir. Pipeline sinyali ve snapshot SMA bazlıdır. Snapshot değerleri dashboard içinde yeniden hesaplanmaz; Supabase’den geldiği gibi gösterilir.",
     )
 
 with st.expander("Grafik ayarları", expanded=False):
@@ -1878,7 +1880,7 @@ with st.expander("Grafik ayarları", expanded=False):
 with st.expander("Gösterge açıklamaları", expanded=False):
     st.markdown(
         f"""
-- **SMA çizgileri:** Hover ve snapshot tablosunda artık SMA değerleri gösterilir. Grafik çiziminde üstteki EMA/SMA seçimi yalnızca çizilen ortalamaları değiştirir.
+- **EMA/SMA çizgileri:** Seçili hareketli ortalama çizgileri. Plotly legend'da sadece bunlar gösterilir.
 - **Zone çizgisi:** Siyah kesikli yatay çizgi.
 - **Zone buffer:** Zone çizgisinin altındaki/üstündeki hafif gri yatay bant.
 - **Normal momentum:** Gri/yeşilimsi dikey gölge.
