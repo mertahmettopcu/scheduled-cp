@@ -914,8 +914,10 @@ def latest_strategy_snapshot(pair: str, timeframe: str, df: pd.DataFrame) -> Dic
         "timeframe": timeframe,
         "last_open_time": last["open_time"].isoformat().replace("+00:00", "Z"),
         "close": _safe_float(last["close"]),
-        "sma4": _safe_float(last["sma4"]),
-        "sma16": _safe_float(last["sma16"]),
+        "sma4": _safe_float(last.get("sma4")),
+        "sma16": _safe_float(last.get("sma16")),
+        "sma65": _safe_float(last.get("sma65")),
+        "sma120": _safe_float(last.get("sma120")),
         "ema4": _safe_float(last["ema4"]),
         "ema16": _safe_float(last["ema16"]),
         "ema65": _safe_float(last["ema65"]),
@@ -942,7 +944,10 @@ def latest_strategy_snapshot(pair: str, timeframe: str, df: pd.DataFrame) -> Dic
 
 
 def latest_daily_ichimoku_snapshot(pair: str, df: pd.DataFrame) -> Dict:
-    daily = add_ichimoku(df)
+    # 1D snapshot keeps Ichimoku as the signal source, but also publishes SMA values
+    # so dashboard snapshot remains a read-only view of Supabase data.
+    daily = add_ema_rsi_features(df)
+    daily = add_ichimoku(daily)
     last = daily.iloc[-1]
 
     signal, ichi_details = classify_ichimoku_signal(daily)
@@ -952,6 +957,11 @@ def latest_daily_ichimoku_snapshot(pair: str, df: pd.DataFrame) -> Dict:
         "timeframe": "1d",
         "last_open_time": last["open_time"].isoformat().replace("+00:00", "Z"),
         "close": _safe_float(last["close"]),
+        "sma4": _safe_float(last.get("sma4")),
+        "sma16": _safe_float(last.get("sma16")),
+        "sma65": _safe_float(last.get("sma65")),
+        "sma120": _safe_float(last.get("sma120")),
+        "sma168": _safe_float(last.get("sma168")),
         "tenkan": _safe_float(last.get("tenkan")),
         "kijun": _safe_float(last.get("kijun")),
         "senkou_a": _safe_float(last.get("senkou_a")),
