@@ -22,6 +22,7 @@ from core_utils import (
     candles_to_records,
     classify_ichimoku_signal,
     create_supabase_client_from_env,
+    get_closed_candles,
     get_previous_snapshot_map,
     klines_to_df,
     latest_daily_ichimoku_snapshot,
@@ -535,9 +536,33 @@ def run() -> None:
             log(f"  └─ Skipping {pair} snapshot generation because one or more timeframes are missing")
             continue
 
-        snap_15m = latest_strategy_snapshot(pair, "15m", pair_dfs["15m"])
-        snap_1h = latest_strategy_snapshot(pair, "1h", pair_dfs["1h"])
-        snap_1d = latest_daily_ichimoku_snapshot(pair, pair_dfs["1d"])
+        closed_15m_df = get_closed_candles(pair_dfs["15m"])
+        closed_1h_df = get_closed_candles(pair_dfs["1h"])
+        closed_1d_df = get_closed_candles(pair_dfs["1d"])
+
+        if closed_15m_df.empty or closed_1h_df.empty or closed_1d_df.empty:
+            log(f"  └─ Skipping {pair} snapshot generation because one or more closed timeframes are missing")
+            continue
+
+        open_1h_df = pair_dfs["1h"].copy().sort_values("open_time").reset_index(drop=True)
+        open_1h_row = open_1h_df.iloc[-1]
+        latest_closed_1h_row = closed_1h_df.iloc[-1]
+
+        if pd.Timestamp(open_1h_row["open_time"]) > pd.Timestamp(latest_closed_1h_row["open_time"]):
+            log(
+                f"  └─ 1h open candle detected for {pair}: "
+                f"open_time={_iso_from_ts(open_1h_row['open_time'])}; "
+                f"official 1h signal uses closed candle={_iso_from_ts(latest_closed_1h_row['open_time'])}"
+            )
+        else:
+            log(
+                f"  └─ No separate open 1h candle detected for {pair}; "
+                f"official 1h signal uses latest candle={_iso_from_ts(latest_closed_1h_row['open_time'])}"
+            )
+
+        snap_15m = latest_strategy_snapshot(pair, "15m", closed_15m_df)
+        snap_1h = latest_strategy_snapshot(pair, "1h", closed_1h_df)
+        snap_1d = latest_daily_ichimoku_snapshot(pair, closed_1d_df)
 
         snapshot_rows.extend([snap_15m, snap_1h, snap_1d])
 
@@ -552,9 +577,9 @@ def run() -> None:
 
         log(f"  └─ Signal state checked for {pair}")
 
-        df_15m_feat = add_ema_rsi_features(pair_dfs["15m"])
-        df_1h_feat = add_ema_rsi_features(pair_dfs["1h"])
-        df_1d_ichi = add_ichimoku(pair_dfs["1d"])
+        df_15m_feat = add_ema_rsi_features(closed_15m_df)
+        df_1h_feat = add_ema_rsi_features(closed_1h_df)
+        df_1d_ichi = add_ichimoku(closed_1d_df)
 
         latest_15m = df_15m_feat.iloc[-1]
         latest_1h = df_1h_feat.iloc[-1]
@@ -596,7 +621,13 @@ def run() -> None:
         # -------------------------------------------------
         # 1H tarafını şimdilik eski genel mesaj formatıyla koruyoruz.
         # 1D değişimi için özel Ichimoku lifecycle mesajları aşağıda üretilecek.
-        if has_previous_snapshot and changed_1h:
+        triggered_1h_directional = (
+            has_previous_snapshot
+            and changed_1h
+            and normalize_signal(snap_1h["signal"]) in {"LONG", "SHORT"}
+        )
+
+        if triggered_1h_directional:
             legacy_1h_message = build_telegram_message(
                 pair=pair,
                 row_15m=latest_15m,
@@ -613,7 +644,7 @@ def run() -> None:
                 candle_time_1d=snap_1d["last_open_time"],
                 streamlit_app_url=STREAMLIT_APP_URL,
                 triggered_15m=False,
-                triggered_1h=changed_1h,
+                triggered_1h=triggered_1h_directional,
                 triggered_1d=False,
             )
             notification_messages.append(legacy_1h_message)
