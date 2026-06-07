@@ -557,13 +557,25 @@ def evaluate_counter_momentum(
     reference_signal = normalize_signal(reference_signal)
 
     if reference_signal not in {"LONG", "SHORT"}:
-        return {"should_warn": False, "reason": "no directional reference signal"}
+        return {
+            "should_warn": False,
+            "reason": "no directional reference signal",
+            "reference_signal": reference_signal,
+        }
 
     candle_open = float(open_1h_row["open"])
     current_price = float(open_1h_row["close"])
+    body_size = abs(current_price - candle_open)
 
     if current_price == candle_open:
-        return {"should_warn": False, "reason": "open candle body is zero"}
+        return {
+            "should_warn": False,
+            "reason": "open candle body is zero",
+            "reference_signal": reference_signal,
+            "candle_open": candle_open,
+            "current_price": current_price,
+            "body_size": 0.0,
+        }
 
     candle_direction = "LONG" if current_price > candle_open else "SHORT"
     expected_counter_direction = "SHORT" if reference_signal == "LONG" else "LONG"
@@ -574,6 +586,10 @@ def evaluate_counter_momentum(
             "reason": "open candle is not moving against reference signal",
             "reference_signal": reference_signal,
             "candle_direction": candle_direction,
+            "counter_direction": expected_counter_direction,
+            "candle_open": candle_open,
+            "current_price": current_price,
+            "body_size": body_size,
         }
 
     zone_context = find_opening_zone_context(candle_open, zones)
@@ -584,10 +600,16 @@ def evaluate_counter_momentum(
             "reason": zone_context.get("reason", "zone context unavailable"),
             "reference_signal": reference_signal,
             "candle_direction": candle_direction,
-            **zone_context,
+            "counter_direction": expected_counter_direction,
+            "candle_open": candle_open,
+            "current_price": current_price,
+            "body_size": body_size,
+            "upper_zone": zone_context.get("upper_zone"),
+            "lower_zone": zone_context.get("lower_zone"),
+            "zone_distance": zone_context.get("zone_distance"),
+            "zone_context_reason": zone_context.get("reason"),
         }
 
-    body_size = abs(current_price - candle_open)
     zone_distance = float(zone_context["zone_distance"])
     ratio_pct = (body_size / zone_distance) * 100.0
 
@@ -595,15 +617,24 @@ def evaluate_counter_momentum(
         "reference_signal": reference_signal,
         "candle_direction": candle_direction,
         "counter_direction": expected_counter_direction,
+        "candle_open": candle_open,
+        "current_price": current_price,
+        "body_size": body_size,
         "ratio_pct": ratio_pct,
         "early_threshold_pct": float(early_threshold_pct),
         "full_threshold_pct": float(full_threshold_pct),
-        "body_size": body_size,
-        **zone_context,
+        "upper_zone": zone_context.get("upper_zone"),
+        "lower_zone": zone_context.get("lower_zone"),
+        "zone_distance": zone_distance,
+        "zone_context_reason": zone_context.get("reason"),
     }
 
     if ratio_pct < float(early_threshold_pct):
-        return {"should_warn": False, "reason": "below early threshold", **base_payload}
+        return {
+            "should_warn": False,
+            "reason": "below early threshold",
+            **base_payload,
+        }
 
     status = "THRESHOLD_REACHED" if ratio_pct >= float(full_threshold_pct) else "EARLY_WARNING"
     opposite_conditions = evaluate_opposite_sma_rsi_conditions(
@@ -619,19 +650,9 @@ def evaluate_counter_momentum(
         "reference_signal_time": reference_signal_time,
         "candle_open_time": open_1h_row["open_time"].isoformat().replace("+00:00", "Z"),
         "candle_close_time": open_1h_row["close_time"].isoformat().replace("+00:00", "Z"),
-        "candle_open": candle_open,
-        "current_price": current_price,
-        "candle_direction": candle_direction,
-        "counter_direction": expected_counter_direction,
-        "body_size": body_size,
-        "ratio_pct": ratio_pct,
-        "early_threshold_pct": float(early_threshold_pct),
-        "full_threshold_pct": float(full_threshold_pct),
         "status": status,
-        "upper_zone": zone_context.get("upper_zone"),
-        "lower_zone": zone_context.get("lower_zone"),
-        "zone_distance": zone_distance,
         "opposite_conditions": opposite_conditions,
+        **base_payload,
     }
 
 
@@ -1255,9 +1276,7 @@ def get_closed_candles(df: pd.DataFrame) -> pd.DataFrame:
     work = df.copy()
     work["close_time"] = pd.to_datetime(work["close_time"], errors="coerce", utc=True)
 
-    now_utc = pd.Timestamp.utcnow()
-    if now_utc.tzinfo is None:
-        now_utc = now_utc.tz_localize("UTC")
+    now_utc = pd.Timestamp.now(tz="UTC")
 
     work = work[
         work["close_time"].notna()
