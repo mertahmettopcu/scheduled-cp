@@ -184,9 +184,7 @@ def get_closed_daily_ichimoku_df(df_1d_ichi: pd.DataFrame) -> pd.DataFrame:
     work = df_1d_ichi.copy()
     work["close_time"] = pd.to_datetime(work["close_time"], errors="coerce", utc=True)
 
-    now_utc = pd.Timestamp.utcnow()
-    if now_utc.tzinfo is None:
-        now_utc = now_utc.tz_localize("UTC")
+    now_utc = pd.Timestamp.now(tz="UTC")
 
     work = work[
         work["close_time"].notna()
@@ -512,6 +510,40 @@ def handle_active_ichimoku_state(
         return messages
 
     return messages
+
+
+def format_counter_momentum_skip_reason(event: Dict) -> str:
+    reason = str(event.get("reason") or "conditions not met")
+
+    details: List[str] = []
+
+    reference_signal = event.get("reference_signal")
+    candle_direction = event.get("candle_direction")
+    counter_direction = event.get("counter_direction")
+
+    if reference_signal:
+        details.append(f"reference={reference_signal}")
+    if candle_direction:
+        details.append(f"open_candle_direction={candle_direction}")
+    if counter_direction:
+        details.append(f"counter_direction={counter_direction}")
+
+    ratio_pct = event.get("ratio_pct")
+    early_threshold_pct = event.get("early_threshold_pct")
+    if ratio_pct is not None:
+        if early_threshold_pct is not None:
+            details.append(f"ratio={float(ratio_pct):.2f}%/{float(early_threshold_pct):.2f}%")
+        else:
+            details.append(f"ratio={float(ratio_pct):.2f}%")
+
+    zone_distance = event.get("zone_distance")
+    if zone_distance is not None:
+        details.append(f"zone_distance={float(zone_distance):.2f}")
+
+    if details:
+        return f"{reason} ({', '.join(details)})"
+
+    return reason
 
 
 def fetch_active_manual_zones(supabase, pair: str) -> pd.DataFrame:
@@ -841,7 +873,7 @@ def run() -> None:
                 else:
                     log(
                         f"  └─ Counter momentum skipped for {pair}: "
-                        f"{counter_event.get('reason', 'conditions not met')}"
+                        f"{format_counter_momentum_skip_reason(counter_event)}"
                     )
         else:
             log(f"  └─ Counter momentum skipped for {pair}: no separate open 1h candle")
