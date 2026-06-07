@@ -351,6 +351,344 @@ def read_ichimoku_tp_multiplier(default: float = 1.7) -> float:
     return value
 
 
+def read_counter_momentum_thresholds(
+    early_default: float = 20.0,
+    full_default: float = 35.0,
+) -> tuple[float, float]:
+    early_raw = os.getenv("COUNTER_MOMENTUM_EARLY_THRESHOLD")
+    full_raw = os.getenv("COUNTER_MOMENTUM_FULL_THRESHOLD")
+
+    def _read_pct(raw, default, name):
+        if raw is None or str(raw).strip() == "":
+            return float(default)
+        try:
+            value = float(str(raw).strip())
+        except ValueError:
+            log(f"WARNING: Invalid {name}={raw!r}. Falling back to {default}.")
+            return float(default)
+        if value <= 0:
+            log(f"WARNING: {name} must be positive. Falling back to {default}.")
+            return float(default)
+        return value
+
+    early = _read_pct(early_raw, early_default, "COUNTER_MOMENTUM_EARLY_THRESHOLD")
+    full = _read_pct(full_raw, full_default, "COUNTER_MOMENTUM_FULL_THRESHOLD")
+
+    if early > full:
+        log(
+            "WARNING: COUNTER_MOMENTUM_EARLY_THRESHOLD is greater than "
+            "COUNTER_MOMENTUM_FULL_THRESHOLD. Swapping values."
+        )
+        early, full = full, early
+
+    return early, full
+
+
+def read_counter_momentum_repeat_mode(default: str = "always") -> str:
+    raw = os.getenv("COUNTER_MOMENTUM_REPEAT_MODE", default)
+    mode = str(raw or default).strip().lower()
+
+    if mode not in {"always", "new_high_only"}:
+        log(
+            f"WARNING: Invalid COUNTER_MOMENTUM_REPEAT_MODE={raw!r}. "
+            f"Falling back to {default!r}."
+        )
+        return default
+
+    return mode
+
+
+def _manual_zone_values(zones: pd.DataFrame) -> list[float]:
+    if zones is None or zones.empty or "zone_value" not in zones.columns:
+        return []
+
+    values = (
+        pd.to_numeric(zones["zone_value"], errors="coerce")
+        .dropna()
+        .drop_duplicates()
+        .sort_values(ascending=False)
+        .tolist()
+    )
+    return [float(v) for v in values]
+
+
+def find_opening_zone_context(open_price: float, zones: pd.DataFrame) -> Dict:
+    zone_values = _manual_zone_values(zones)
+
+    if not zone_values or open_price is None or pd.isna(open_price):
+        return {
+            "upper_zone": None,
+            "lower_zone": None,
+            "zone_distance": None,
+            "reason": "zone context unavailable",
+        }
+
+    open_price = float(open_price)
+    upper_candidates = [z for z in zone_values if z > open_price]
+    lower_candidates = [z for z in zone_values if z < open_price]
+
+    upper_zone = min(upper_candidates) if upper_candidates else None
+    lower_zone = max(lower_candidates) if lower_candidates else None
+
+    if upper_zone is None or lower_zone is None:
+        return {
+            "upper_zone": upper_zone,
+            "lower_zone": lower_zone,
+            "zone_distance": None,
+            "reason": "open price is outside available zone range",
+        }
+
+    zone_distance = float(upper_zone) - float(lower_zone)
+
+    if zone_distance <= 0:
+        return {
+            "upper_zone": upper_zone,
+            "lower_zone": lower_zone,
+            "zone_distance": None,
+            "reason": "invalid zone distance",
+        }
+
+    return {
+        "upper_zone": float(upper_zone),
+        "lower_zone": float(lower_zone),
+        "zone_distance": float(zone_distance),
+        "reason": "ok",
+    }
+
+
+def evaluate_opposite_sma_rsi_conditions(
+    df_1h_with_current_open: pd.DataFrame,
+    reference_signal: str,
+) -> Dict:
+    reference_signal = normalize_signal(reference_signal)
+
+    if df_1h_with_current_open.empty:
+        return {"opposite_signal": "NEUTRAL", "conditions_met": False, "conditions": {}}
+
+    feat = add_ema_rsi_features(df_1h_with_current_open)
+    last = feat.iloc[-1]
+
+    if reference_signal == "LONG":
+        opposite_signal = "SHORT"
+        conditions = {
+            "SMA4 < SMA16": bool(last["sma4"] < last["sma16"]),
+            "RSI14 < RSI52": bool(last["rsi14"] < last["rsi52"]),
+            "RSI14 <= 50": bool(last["rsi14"] <= 50),
+        }
+    elif reference_signal == "SHORT":
+        opposite_signal = "LONG"
+        conditions = {
+            "SMA4 > SMA16": bool(last["sma4"] > last["sma16"]),
+            "RSI14 > RSI52": bool(last["rsi14"] > last["rsi52"]),
+            "RSI14 >= 50": bool(last["rsi14"] >= 50),
+        }
+    else:
+        return {"opposite_signal": "NEUTRAL", "conditions_met": False, "conditions": {}}
+
+    return {
+        "opposite_signal": opposite_signal,
+        "conditions_met": all(conditions.values()),
+        "conditions": conditions,
+        "sma4": _safe_float(last.get("sma4")),
+        "sma16": _safe_float(last.get("sma16")),
+        "rsi14": _safe_float(last.get("rsi14")),
+        "rsi52": _safe_float(last.get("rsi52")),
+    }
+
+
+def get_last_directional_sma_rsi_reference(df: pd.DataFrame) -> Dict:
+    """
+    Find the latest closed 1H state-change event where SMA/RSI state became
+    LONG or SHORT. NEUTRAL states do not erase the last directional reference.
+
+    This is used as the reference direction for counter momentum warnings.
+    """
+    if df.empty:
+        return {
+            "signal": "NEUTRAL",
+            "signal_time": None,
+            "row": None,
+            "reason": "empty dataframe",
+        }
+
+    feat = add_ema_rsi_features(df)
+    signals = feat.apply(classify_ema_rsi_signal, axis=1)
+    prev_signals = signals.shift(1).fillna("NEUTRAL")
+
+    event_mask = (
+        signals.isin(["LONG", "SHORT"])
+        & (signals != prev_signals)
+    )
+
+    events = feat.loc[event_mask].copy()
+    events["reference_signal"] = signals.loc[event_mask].values
+
+    if events.empty:
+        return {
+            "signal": "NEUTRAL",
+            "signal_time": None,
+            "row": None,
+            "reason": "no directional state-change event",
+        }
+
+    last_event = events.iloc[-1]
+    signal = str(last_event["reference_signal"]).upper()
+    signal_time = last_event["open_time"].isoformat().replace("+00:00", "Z")
+
+    return {
+        "signal": signal,
+        "signal_time": signal_time,
+        "row": last_event,
+        "reason": "ok",
+    }
+
+
+def evaluate_counter_momentum(
+    *,
+    pair: str,
+    reference_signal: str | None,
+    reference_signal_time: str | None,
+    open_1h_row: pd.Series,
+    df_1h_with_current_open: pd.DataFrame,
+    zones: pd.DataFrame,
+    early_threshold_pct: float,
+    full_threshold_pct: float,
+) -> Dict:
+    reference_signal = normalize_signal(reference_signal)
+
+    if reference_signal not in {"LONG", "SHORT"}:
+        return {"should_warn": False, "reason": "no directional reference signal"}
+
+    candle_open = float(open_1h_row["open"])
+    current_price = float(open_1h_row["close"])
+
+    if current_price == candle_open:
+        return {"should_warn": False, "reason": "open candle body is zero"}
+
+    candle_direction = "LONG" if current_price > candle_open else "SHORT"
+    expected_counter_direction = "SHORT" if reference_signal == "LONG" else "LONG"
+
+    if candle_direction != expected_counter_direction:
+        return {
+            "should_warn": False,
+            "reason": "open candle is not moving against reference signal",
+            "reference_signal": reference_signal,
+            "candle_direction": candle_direction,
+        }
+
+    zone_context = find_opening_zone_context(candle_open, zones)
+
+    if zone_context.get("zone_distance") is None:
+        return {
+            "should_warn": False,
+            "reason": zone_context.get("reason", "zone context unavailable"),
+            "reference_signal": reference_signal,
+            "candle_direction": candle_direction,
+            **zone_context,
+        }
+
+    body_size = abs(current_price - candle_open)
+    zone_distance = float(zone_context["zone_distance"])
+    ratio_pct = (body_size / zone_distance) * 100.0
+
+    base_payload = {
+        "reference_signal": reference_signal,
+        "candle_direction": candle_direction,
+        "counter_direction": expected_counter_direction,
+        "ratio_pct": ratio_pct,
+        "early_threshold_pct": float(early_threshold_pct),
+        "full_threshold_pct": float(full_threshold_pct),
+        "body_size": body_size,
+        **zone_context,
+    }
+
+    if ratio_pct < float(early_threshold_pct):
+        return {"should_warn": False, "reason": "below early threshold", **base_payload}
+
+    status = "THRESHOLD_REACHED" if ratio_pct >= float(full_threshold_pct) else "EARLY_WARNING"
+    opposite_conditions = evaluate_opposite_sma_rsi_conditions(
+        df_1h_with_current_open=df_1h_with_current_open,
+        reference_signal=reference_signal,
+    )
+
+    return {
+        "should_warn": True,
+        "pair": pair,
+        "timeframe": "1h",
+        "reference_signal": reference_signal,
+        "reference_signal_time": reference_signal_time,
+        "candle_open_time": open_1h_row["open_time"].isoformat().replace("+00:00", "Z"),
+        "candle_close_time": open_1h_row["close_time"].isoformat().replace("+00:00", "Z"),
+        "candle_open": candle_open,
+        "current_price": current_price,
+        "candle_direction": candle_direction,
+        "counter_direction": expected_counter_direction,
+        "body_size": body_size,
+        "ratio_pct": ratio_pct,
+        "early_threshold_pct": float(early_threshold_pct),
+        "full_threshold_pct": float(full_threshold_pct),
+        "status": status,
+        "upper_zone": zone_context.get("upper_zone"),
+        "lower_zone": zone_context.get("lower_zone"),
+        "zone_distance": zone_distance,
+        "opposite_conditions": opposite_conditions,
+    }
+
+
+def build_counter_momentum_message(*, event: Dict, streamlit_app_url: str) -> str:
+    pair = event.get("pair")
+    app_link = _build_app_link(pair, streamlit_app_url)
+
+    status = str(event.get("status") or "").upper()
+    status_text = (
+        "Counter momentum threshold reached"
+        if status == "THRESHOLD_REACHED"
+        else "Counter momentum early warning"
+    )
+
+    opposite = event.get("opposite_conditions") or {}
+    conditions = opposite.get("conditions") or {}
+    condition_lines = [f"- {name}: {'YES' if ok else 'NO'}" for name, ok in conditions.items()]
+
+    if not condition_lines:
+        condition_lines.append("- Opposite conditions: unavailable")
+
+    lines = [
+        f"{pair}",
+        f"1h candle: {_format_candle_time_for_message(event.get('candle_open_time'))}",
+    ]
+
+    if app_link:
+        lines.append(f"Chart: {app_link}")
+
+    lines.extend([
+        "",
+        f"1h Counter Momentum: {signal_badge(event.get('reference_signal'))} → {signal_badge(event.get('counter_direction'))} ⚠️",
+        f"Event: {status_text}",
+        "",
+        f"Reference signal: {signal_badge(event.get('reference_signal'))}",
+        f"Counter direction: {signal_badge(event.get('counter_direction'))}",
+        f"Open price: {format_price(event.get('candle_open'))}",
+        f"Current price: {format_price(event.get('current_price'))}",
+        f"Body size: {format_price(event.get('body_size'))}",
+        f"Opening zone: {format_price(event.get('lower_zone'))} - {format_price(event.get('upper_zone'))}",
+        f"Zone distance: {format_price(event.get('zone_distance'))}",
+        f"Counter body ratio: {float(event.get('ratio_pct')):.2f}%",
+        f"Early warning threshold: {float(event.get('early_threshold_pct')):.2f}%",
+        f"Full momentum threshold: {float(event.get('full_threshold_pct')):.2f}%",
+        "",
+        f"Opposite {opposite.get('opposite_signal', 'NEUTRAL')} conditions on current open 1H candle:",
+        *condition_lines,
+        f"Opposite signal conditions currently met: {'YES' if opposite.get('conditions_met') else 'NO'}",
+        "",
+        "Official 1H signal: not confirmed",
+        "Candle still open",
+        "May disappear before 1H close",
+    ])
+
+    return "\n".join(lines)
+
+
 def get_ichimoku_condition_summary(df: pd.DataFrame) -> Dict:
     if df.empty:
         return {
