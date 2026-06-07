@@ -903,8 +903,42 @@ def signal_changed(prev_value: str | None, new_value: str) -> bool:
     return prev_norm != new_norm
 
 
+def get_closed_candles(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Return only candles whose close_time is <= current UTC time.
+
+    Official snapshot/signal calculations use this closed-candle data.
+    Open-candle checks, such as counter momentum early warning, must use
+    the latest raw candle separately.
+    """
+    if df.empty or "close_time" not in df.columns:
+        return pd.DataFrame()
+
+    work = df.copy()
+    work["close_time"] = pd.to_datetime(work["close_time"], errors="coerce", utc=True)
+
+    now_utc = pd.Timestamp.utcnow()
+    if now_utc.tzinfo is None:
+        now_utc = now_utc.tz_localize("UTC")
+
+    work = work[
+        work["close_time"].notna()
+        & (work["close_time"] <= now_utc)
+    ].copy()
+
+    if "open_time" in work.columns:
+        work = work.sort_values("open_time").reset_index(drop=True)
+
+    return work
+
+
 def latest_strategy_snapshot(pair: str, timeframe: str, df: pd.DataFrame) -> Dict:
-    df_feat = add_ema_rsi_features(df)
+    closed_df = get_closed_candles(df)
+
+    if closed_df.empty:
+        raise ValueError(f"No closed candles available for {pair} {timeframe} snapshot.")
+
+    df_feat = add_ema_rsi_features(closed_df)
     last = df_feat.iloc[-1]
 
     signal = classify_ema_rsi_signal(last)
