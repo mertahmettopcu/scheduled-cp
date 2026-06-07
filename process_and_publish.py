@@ -17,18 +17,23 @@ from core_utils import (
     build_ichimoku_state_closed_message,
     build_ichimoku_tp_confirmed_message,
     build_ichimoku_tp_hit_message,
+    build_counter_momentum_message,
     build_telegram_message,
     calculate_ichimoku_trade_plan,
     candles_to_records,
     classify_ichimoku_signal,
     create_supabase_client_from_env,
+    evaluate_counter_momentum,
     get_closed_candles,
+    get_last_directional_sma_rsi_reference,
     get_previous_snapshot_map,
     klines_to_df,
     latest_daily_ichimoku_snapshot,
     latest_strategy_snapshot,
     log,
     normalize_signal,
+    read_counter_momentum_repeat_mode,
+    read_counter_momentum_thresholds,
     read_ichimoku_tp_multiplier,
     send_telegram_message,
     signal_changed,
@@ -41,6 +46,11 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_IDS_RAW = os.getenv("TELEGRAM_CHAT_IDS", "")
 TELEGRAM_CHAT_IDS = [x.strip() for x in TELEGRAM_CHAT_IDS_RAW.split(",") if x.strip()]
 ICHIMOKU_TP_MULTIPLIER = read_ichimoku_tp_multiplier(default=1.7)
+COUNTER_MOMENTUM_EARLY_THRESHOLD, COUNTER_MOMENTUM_FULL_THRESHOLD = read_counter_momentum_thresholds(
+    early_default=20.0,
+    full_default=35.0,
+)
+COUNTER_MOMENTUM_REPEAT_MODE = read_counter_momentum_repeat_mode(default="always")
 
 
 def load_cached_raw_data() -> dict:
@@ -504,6 +514,154 @@ def handle_active_ichimoku_state(
     return messages
 
 
+def fetch_active_manual_zones(supabase, pair: str) -> pd.DataFrame:
+    resp = (
+        supabase
+        .table("manual_zones")
+        .select("symbol,zone_value,active,sort_order,note,source,updated_at")
+        .eq("symbol", pair)
+        .eq("active", True)
+        .order("sort_order", desc=False)
+        .execute()
+    )
+
+    df = pd.DataFrame(resp.data or [])
+
+    if df.empty:
+        return df
+
+    if "zone_value" in df.columns:
+        df["zone_value"] = pd.to_numeric(df["zone_value"], errors="coerce")
+
+    return (
+        df
+        .dropna(subset=["zone_value"])
+        .sort_values("zone_value", ascending=False)
+        .reset_index(drop=True)
+    )
+
+
+def fetch_counter_momentum_state(
+    supabase,
+    *,
+    pair: str,
+    candle_open_time: str,
+    reference_signal: str,
+    counter_direction: str,
+) -> Dict | None:
+    resp = (
+        supabase
+        .table("counter_momentum_states")
+        .select("*")
+        .eq("pair", pair)
+        .eq("timeframe", "1h")
+        .eq("candle_open_time", candle_open_time)
+        .eq("reference_signal", reference_signal)
+        .eq("counter_direction", counter_direction)
+        .limit(1)
+        .execute()
+    )
+
+    data = resp.data or []
+    return data[0] if data else None
+
+
+def upsert_counter_momentum_state(
+    supabase,
+    *,
+    event: Dict,
+    notified: bool,
+) -> Dict | None:
+    existing = fetch_counter_momentum_state(
+        supabase,
+        pair=event["pair"],
+        candle_open_time=event["candle_open_time"],
+        reference_signal=event["reference_signal"],
+        counter_direction=event["counter_direction"],
+    )
+
+    previous_warning_count = int(existing.get("warning_count") or 0) if existing else 0
+    previous_last_notified_ratio = existing.get("last_notified_ratio") if existing else None
+
+    payload = {
+        "pair": event["pair"],
+        "timeframe": "1h",
+        "reference_signal": event["reference_signal"],
+        "reference_signal_time": event.get("reference_signal_time"),
+        "candle_open_time": event["candle_open_time"],
+        "candle_close_time": event.get("candle_close_time"),
+        "counter_direction": event["counter_direction"],
+        "last_ratio": float(event["ratio_pct"]),
+        "last_status": event["status"],
+        "warning_count": previous_warning_count + 1 if notified else previous_warning_count,
+        "updated_at": pd.Timestamp.now(tz="UTC").isoformat().replace("+00:00", "Z"),
+    }
+
+    if notified:
+        payload["last_notified_ratio"] = float(event["ratio_pct"])
+    elif previous_last_notified_ratio is not None:
+        payload["last_notified_ratio"] = previous_last_notified_ratio
+
+    resp = (
+        supabase
+        .table("counter_momentum_states")
+        .upsert(
+            payload,
+            on_conflict="pair,timeframe,candle_open_time,reference_signal,counter_direction",
+        )
+        .execute()
+    )
+
+    data = resp.data or []
+    return data[0] if data else None
+
+
+def should_send_counter_momentum_warning(
+    *,
+    event: Dict,
+    existing_state: Dict | None,
+    repeat_mode: str,
+) -> bool:
+    if repeat_mode == "always":
+        return True
+
+    if repeat_mode == "new_high_only":
+        if existing_state is None:
+            return True
+
+        last_notified_ratio = existing_state.get("last_notified_ratio")
+
+        if last_notified_ratio is None or pd.isna(last_notified_ratio):
+            return True
+
+        return float(event["ratio_pct"]) > float(last_notified_ratio)
+
+    return True
+
+
+def build_1h_with_current_open_df(
+    closed_1h_df: pd.DataFrame,
+    open_1h_row: pd.Series,
+) -> pd.DataFrame:
+    if closed_1h_df.empty:
+        return pd.DataFrame([open_1h_row.to_dict()])
+
+    latest_closed_open_time = pd.Timestamp(closed_1h_df.iloc[-1]["open_time"])
+    open_candle_time = pd.Timestamp(open_1h_row["open_time"])
+
+    if open_candle_time > latest_closed_open_time:
+        return (
+            pd.concat(
+                [closed_1h_df, pd.DataFrame([open_1h_row.to_dict()])],
+                ignore_index=True,
+            )
+            .sort_values("open_time")
+            .reset_index(drop=True)
+        )
+
+    return closed_1h_df.copy().sort_values("open_time").reset_index(drop=True)
+
+
 def run() -> None:
     supabase = create_supabase_client_from_env()
     raw_payload = load_cached_raw_data()
@@ -609,6 +767,84 @@ def run() -> None:
         changed_1d_lifecycle = signal_changed(previous_signal_1d, current_signal_1d)
 
         notification_messages: List[str] = []
+
+        # -------------------------------------------------
+        # Counter momentum early warning
+        # -------------------------------------------------
+        # Official 1H signal uses CLOSED 1H candles.
+        # Counter momentum uses the currently OPEN 1H candle, if Binance provides one.
+        if pd.Timestamp(open_1h_row["open_time"]) > pd.Timestamp(latest_closed_1h_row["open_time"]):
+            manual_zones = fetch_active_manual_zones(supabase, pair)
+
+            if manual_zones.empty:
+                log(f"  └─ Counter momentum skipped for {pair}: no active manual zones")
+            else:
+                reference = get_last_directional_sma_rsi_reference(closed_1h_df)
+                reference_signal = normalize_signal(reference.get("signal"))
+                reference_signal_time = reference.get("signal_time")
+
+                df_1h_with_current_open = build_1h_with_current_open_df(
+                    closed_1h_df=closed_1h_df,
+                    open_1h_row=open_1h_row,
+                )
+
+                counter_event = evaluate_counter_momentum(
+                    pair=pair,
+                    reference_signal=reference_signal,
+                    reference_signal_time=reference_signal_time,
+                    open_1h_row=open_1h_row,
+                    df_1h_with_current_open=df_1h_with_current_open,
+                    zones=manual_zones,
+                    early_threshold_pct=COUNTER_MOMENTUM_EARLY_THRESHOLD,
+                    full_threshold_pct=COUNTER_MOMENTUM_FULL_THRESHOLD,
+                )
+
+                if counter_event.get("should_warn"):
+                    existing_counter_state = fetch_counter_momentum_state(
+                        supabase,
+                        pair=pair,
+                        candle_open_time=counter_event["candle_open_time"],
+                        reference_signal=counter_event["reference_signal"],
+                        counter_direction=counter_event["counter_direction"],
+                    )
+
+                    send_counter_warning = should_send_counter_momentum_warning(
+                        event=counter_event,
+                        existing_state=existing_counter_state,
+                        repeat_mode=COUNTER_MOMENTUM_REPEAT_MODE,
+                    )
+
+                    upsert_counter_momentum_state(
+                        supabase,
+                        event=counter_event,
+                        notified=send_counter_warning,
+                    )
+
+                    if send_counter_warning:
+                        notification_messages.append(
+                            build_counter_momentum_message(
+                                event=counter_event,
+                                streamlit_app_url=STREAMLIT_APP_URL,
+                            )
+                        )
+                        log(
+                            f"  └─ Counter momentum warning queued for {pair}: "
+                            f"{counter_event['ratio_pct']:.2f}% "
+                            f"({COUNTER_MOMENTUM_REPEAT_MODE})"
+                        )
+                    else:
+                        log(
+                            f"  └─ Counter momentum warning skipped for {pair}: "
+                            f"repeat_mode={COUNTER_MOMENTUM_REPEAT_MODE}, "
+                            f"ratio={counter_event['ratio_pct']:.2f}%"
+                        )
+                else:
+                    log(
+                        f"  └─ Counter momentum skipped for {pair}: "
+                        f"{counter_event.get('reason', 'conditions not met')}"
+                    )
+        else:
+            log(f"  └─ Counter momentum skipped for {pair}: no separate open 1h candle")
 
         has_previous_snapshot = (
             prev_15m is not None
