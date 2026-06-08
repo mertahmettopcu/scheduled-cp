@@ -147,7 +147,7 @@ def update_ichimoku_trade_state(
     updates: Dict,
 ) -> Dict | None:
     payload = dict(updates)
-    payload["updated_at"] = pd.Timestamp.now(tz="UTC").isoformat().replace("+00:00", "Z")
+    payload["updated_at"] = pd.Timestamp.utcnow().isoformat().replace("+00:00", "Z")
 
     resp = (
         supabase
@@ -306,7 +306,7 @@ def handle_pending_ichimoku_state(
     if current_close_time.tzinfo is None:
         current_close_time = current_close_time.tz_localize("UTC")
 
-    now_utc = pd.Timestamp.now(tz="UTC")
+    now_utc = pd.Timestamp.utcnow()
 
     if now_utc.tzinfo is None:
         now_utc = now_utc.tz_localize("UTC")
