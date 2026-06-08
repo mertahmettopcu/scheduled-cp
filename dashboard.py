@@ -279,6 +279,32 @@ def _safe_round(value, digits=4):
         return None
     return round(float(value), digits)
 
+
+def get_closed_candles(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Pipeline ile aynı resmi sinyal standardı:
+    official signal / marker hesapları sadece kapanmış mumlardan üretilir.
+    Açık mum grafikte görünmeye devam eder; ama resmi 1H marker üretmez.
+    """
+    if df.empty or "close_time" not in df.columns:
+        return pd.DataFrame()
+
+    work = df.copy()
+    work["close_time"] = pd.to_datetime(work["close_time"], errors="coerce", utc=True)
+
+    now_utc = pd.Timestamp.now(tz="UTC")
+
+    work = work[
+        work["close_time"].notna()
+        & (work["close_time"] <= now_utc)
+    ].copy()
+
+    if "open_time" in work.columns:
+        work = work.sort_values("open_time").reset_index(drop=True)
+
+    return work
+
+
 def add_ichimoku_signal_columns(
     df: pd.DataFrame,
     ichimoku_rr_multiplier: float = 1.7,
@@ -1898,7 +1924,16 @@ if hourly.empty or m15.empty or daily.empty:
     st.warning("Bu coin için gerekli candle verileri Supabase'te yok. Önce pipeline'ı çalıştır.")
     st.stop()
 
+# Dashboard grafiği açık 1H mumu da gösterebilir.
+# Ancak resmi 1H sinyal markerları pipeline ile aynı şekilde sadece kapanmış 1H mumlardan üretilir.
+hourly_closed_raw = get_closed_candles(hourly)
+
+if hourly_closed_raw.empty:
+    st.warning("1H için kapanmış mum bulunamadı. Resmi sinyal markerları üretilemez.")
+    st.stop()
+
 hourly = add_ema_rsi(hourly)
+hourly_closed = add_ema_rsi(hourly_closed_raw)
 m15 = add_ema_rsi(m15)
 daily = add_ichimoku(daily)
 
@@ -1912,13 +1947,13 @@ daily = add_ichimoku_signal_columns(
 )
 daily_chart = daily.tail(220).copy()
 
-hourly_signal_reference_events = all_signal_events(hourly)
+hourly_signal_reference_events = all_signal_events(hourly_closed)
 hourly_signal_markers = hourly_signal_reference_events[
     hourly_signal_reference_events["open_time"].isin(hourly_chart["open_time"])
 ].copy()
 
 m15_intrabar_signal_reference_events = build_15m_intrabar_reference_markers(
-    hourly_df=hourly,
+    hourly_df=hourly_closed,
     m15_df=m15,
     only_latest=False,
 )
