@@ -3,10 +3,14 @@ name: Scheduled TS
 on:
   workflow_dispatch:
 
+concurrency:
+  group: scheduled-ts
+  cancel-in-progress: true
+
 jobs:
   scheduled-job:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 12
 
     steps:
       - name: Checkout repository
@@ -182,8 +186,8 @@ jobs:
       - name: Check outbound connectivity
         shell: bash
         run: |
-          set -uo pipefail
-          echo "Checking outbound connectivity...:"
+          set -euo pipefail
+          echo "Checking outbound connectivity..."
 
           endpoints=(
             "https://api.ipify.org"
@@ -201,7 +205,7 @@ jobs:
               if ip_output="$(curl --fail --silent --show-error --max-time 20 "$endpoint")"; then
                 ip_output="$(echo "$ip_output" | tr -d '\r' | tr -d '\n' | xargs)"
                 if [ -n "$ip_output" ]; then
-                  echo "Public IP check succeeded."
+                  echo "Public IP check succeeded: $ip_output"
                   success=1
                   break
                 fi
@@ -217,11 +221,15 @@ jobs:
           done
 
           if [ "$success" -ne 1 ]; then
-            echo "::warning ::Connectivity check failed on all fallback endpoints. Continuing to source fetch."
+            echo "::error ::Connectivity check failed on all fallback endpoints. Stopping before Binance fetch."
+            echo "Last OpenVPN log lines:"
+            sudo tail -n 80 /tmp/ovpn.log || true
+            exit 1
           fi
 
       - name: Fetch source data
         env:
+          GOOGLE_SHEETS_SYMBOLS_CSV_URL: ${{ vars.GOOGLE_SHEETS_SYMBOLS_CSV_URL }}
           FETCH_SOURCE_MODE: run
         run: python fetch_source_data.py
 
