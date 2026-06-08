@@ -844,6 +844,45 @@ def load_manual_zones(pair: str) -> pd.DataFrame:
 
     return df
     
+@st.cache_data(ttl=60)
+def load_counter_momentum_states(pair: str) -> pd.DataFrame:
+    r = (
+        supabase.table("counter_momentum_states")
+        .select(
+            "pair,timeframe,reference_signal,reference_signal_time,"
+            "candle_open_time,candle_close_time,counter_direction,"
+            "last_ratio,last_notified_ratio,last_status,warning_count,updated_at"
+        )
+        .eq("pair", pair)
+        .eq("timeframe", "1h")
+        .order("updated_at", desc=True)
+        .limit(200)
+        .execute()
+    )
+
+    df = pd.DataFrame(r.data or [])
+    if df.empty:
+        return df
+
+    for col in ["candle_open_time", "candle_close_time", "reference_signal_time", "updated_at"]:
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors="coerce", utc=True)
+
+    for col in ["last_ratio", "last_notified_ratio"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    if "warning_count" in df.columns:
+        df["warning_count"] = pd.to_numeric(df["warning_count"], errors="coerce")
+
+    return (
+        df
+        .dropna(subset=["candle_open_time"])
+        .sort_values("candle_open_time")
+        .reset_index(drop=True)
+    )
+
+
 # =========================================================
 # Indicator helpers
 # =========================================================
@@ -1502,12 +1541,125 @@ def add_ichimoku_tp_segments(
 
     return fig
     
+def add_counter_momentum_hover_context(
+    chart_df: pd.DataFrame,
+    counter_momentum_states: pd.DataFrame | None,
+) -> pd.DataFrame:
+    out = chart_df.copy()
+
+    cm_cols = [
+        "cm_status_text",
+        "cm_reference_signal_text",
+        "cm_counter_direction_text",
+        "cm_last_ratio_text",
+        "cm_last_notified_ratio_text",
+        "cm_warning_count_text",
+        "cm_updated_at_text",
+        "cm_official_note_text",
+    ]
+
+    out = out.drop(columns=[col for col in cm_cols if col in out.columns], errors="ignore")
+
+    default_values = {
+        "cm_status_text": "no pipeline warning",
+        "cm_reference_signal_text": "NA",
+        "cm_counter_direction_text": "NA",
+        "cm_last_ratio_text": "NA",
+        "cm_last_notified_ratio_text": "NA",
+        "cm_warning_count_text": "NA",
+        "cm_updated_at_text": "NA",
+        "cm_official_note_text": "NA",
+    }
+
+    for col, value in default_values.items():
+        out[col] = value
+
+    if counter_momentum_states is None or counter_momentum_states.empty:
+        return out
+
+    if "open_time" not in out.columns or "candle_open_time" not in counter_momentum_states.columns:
+        return out
+
+    out["open_time"] = pd.to_datetime(out["open_time"], errors="coerce", utc=True)
+
+    states = counter_momentum_states.copy()
+    states["candle_open_time"] = pd.to_datetime(states["candle_open_time"], errors="coerce", utc=True)
+    states = states.dropna(subset=["candle_open_time"]).copy()
+
+    if states.empty:
+        return out
+
+    if "updated_at" in states.columns:
+        states["updated_at"] = pd.to_datetime(states["updated_at"], errors="coerce", utc=True)
+        states = states.sort_values(["candle_open_time", "updated_at"])
+    else:
+        states = states.sort_values("candle_open_time")
+
+    # Aynı mum için birden fazla kayıt olursa en güncel state hover'da gösterilir.
+    states = states.drop_duplicates(subset=["candle_open_time"], keep="last").copy()
+
+    def _ratio_text(value):
+        if value is None or pd.isna(value):
+            return "NA"
+        return f"{float(value):.2f}%"
+
+    def _count_text(value):
+        if value is None or pd.isna(value):
+            return "NA"
+        return str(int(value))
+
+    def _time_text(value):
+        if value is None or pd.isna(value):
+            return "NA"
+        return _fmt_display_time(value) or "NA"
+
+    states["cm_status_text"] = states.get("last_status", pd.Series(index=states.index, dtype="object")).fillna("NA").astype(str)
+    states["cm_reference_signal_text"] = states.get("reference_signal", pd.Series(index=states.index, dtype="object")).fillna("NA").astype(str)
+    states["cm_counter_direction_text"] = states.get("counter_direction", pd.Series(index=states.index, dtype="object")).fillna("NA").astype(str)
+    states["cm_last_ratio_text"] = states.get("last_ratio", pd.Series(index=states.index, dtype="float64")).apply(_ratio_text)
+    states["cm_last_notified_ratio_text"] = states.get("last_notified_ratio", pd.Series(index=states.index, dtype="float64")).apply(_ratio_text)
+    states["cm_warning_count_text"] = states.get("warning_count", pd.Series(index=states.index, dtype="float64")).apply(_count_text)
+    states["cm_updated_at_text"] = states.get("updated_at", pd.Series(index=states.index, dtype="object")).apply(_time_text)
+    states["cm_official_note_text"] = "Official 1H signal: not confirmed"
+
+    keep_cols = [
+        "candle_open_time",
+        "cm_status_text",
+        "cm_reference_signal_text",
+        "cm_counter_direction_text",
+        "cm_last_ratio_text",
+        "cm_last_notified_ratio_text",
+        "cm_warning_count_text",
+        "cm_updated_at_text",
+        "cm_official_note_text",
+    ]
+
+    merged = out.merge(
+        states[keep_cols],
+        left_on="open_time",
+        right_on="candle_open_time",
+        how="left",
+        suffixes=("", "_state"),
+    )
+
+    for col, value in default_values.items():
+        state_col = f"{col}_state"
+        if state_col in merged.columns:
+            merged[col] = merged[state_col].fillna(merged[col])
+            merged = merged.drop(columns=[state_col])
+
+    merged = merged.drop(columns=["candle_open_time"], errors="ignore")
+
+    return merged
+
+
 def make_price_ema_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | None = None, show_zones: bool = False, zone_buffer: float = 0.0,ma_display: str = "EMA",signal_markers: pd.DataFrame | None = None,
     show_signal_markers: bool = False,
     signal_marker_name: str = "Signal",
     show_momentum: bool = False,
     momentum_threshold_pct: float = 35.0,
-    momentum_reference_events: pd.DataFrame | None = None,) -> go.Figure:
+    momentum_reference_events: pd.DataFrame | None = None,
+    counter_momentum_states: pd.DataFrame | None = None,) -> go.Figure:
         
     plot_df = df.copy()
     plot_df["display_time"] = plot_df["open_time"].dt.tz_convert(DISPLAY_TZ)
@@ -1523,6 +1675,11 @@ def make_price_ema_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | Non
         plot_df["hover_lower_zone"] = pd.NA
         plot_df["hover_upper_zone_minus_buffer"] = pd.NA
         plot_df["hover_lower_zone_plus_buffer"] = pd.NA
+
+    plot_df = add_counter_momentum_hover_context(
+        chart_df=plot_df,
+        counter_momentum_states=counter_momentum_states,
+    )
 
     fig = go.Figure()
 
@@ -1541,6 +1698,14 @@ def make_price_ema_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | Non
                 "hover_lower_zone",
                 "hover_upper_zone_minus_buffer",
                 "hover_lower_zone_plus_buffer",
+                "cm_status_text",
+                "cm_reference_signal_text",
+                "cm_counter_direction_text",
+                "cm_last_ratio_text",
+                "cm_last_notified_ratio_text",
+                "cm_warning_count_text",
+                "cm_updated_at_text",
+                "cm_official_note_text",
             ]
         ],
         hovertemplate=(
@@ -1555,6 +1720,16 @@ def make_price_ema_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | Non
             "Lower Zone: %{customdata[1]:.2f}<br>"
             "Upper Zone - Buffer: %{customdata[2]:.2f}<br>"
             "Lower Zone + Buffer: %{customdata[3]:.2f}<br>"
+            "<br>"
+            "Pipeline Counter Momentum:<br>"
+            "Status: %{customdata[4]}<br>"
+            "Reference signal: %{customdata[5]}<br>"
+            "Counter direction: %{customdata[6]}<br>"
+            "Last ratio: %{customdata[7]}<br>"
+            "Last notified ratio: %{customdata[8]}<br>"
+            "Warning count: %{customdata[9]}<br>"
+            "Updated at: %{customdata[10]}<br>"
+            "%{customdata[11]}<br>"
             "<extra></extra>"
         ),
     )
@@ -1914,6 +2089,7 @@ hourly = load_candles(selected_pair, "1h")
 m15 = load_candles(selected_pair, "15m")
 daily = load_candles(selected_pair, "1d")
 manual_zones = load_manual_zones(selected_pair)
+counter_momentum_states = load_counter_momentum_states(selected_pair)
 
 if manual_zones.empty:
     st.info("Bu parite için aktif manual zone bulunamadı.")
@@ -2061,6 +2237,7 @@ st.plotly_chart(
         show_momentum=show_momentum_1h,
         momentum_threshold_pct=momentum_threshold_pct,
         momentum_reference_events=hourly_signal_reference_events,
+        counter_momentum_states=counter_momentum_states if show_momentum_1h else pd.DataFrame(),
     ),
     use_container_width=True,
     config=PLOTLY_CONFIG,
