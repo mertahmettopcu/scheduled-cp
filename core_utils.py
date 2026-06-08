@@ -1545,10 +1545,35 @@ def _build_app_link(pair: str, streamlit_app_url: str) -> str:
 
 
 def _signal_reason(last: pd.Series) -> str:
-    if bool(last.get("long_signal", False)):
-        return "SMA4 crossed above SMA16 and RSI14 > RSI52 and RSI14 >= 50"
+    sma_bull = last["sma4"] > last["sma16"]
+    sma_bear = last["sma4"] < last["sma16"]
+    rsi_bull = last["rsi14"] > last["rsi52"]
+    rsi_bear = last["rsi14"] < last["rsi52"]
 
-    if bool(last.get("short_signal", False)):
-        return "SMA4 crossed below SMA16 and RSI14 < RSI52 and RSI14 <= 50"
+    if sma_bull and rsi_bull and last["rsi14"] >= 50:
+        return "SMA/RSI state LONG: SMA4 > SMA16 and RSI14 > RSI52 and RSI14 >= 50"
 
-    return "No fresh SMA crossover signal"
+    if sma_bear and rsi_bear and last["rsi14"] <= 50:
+        return "SMA/RSI state SHORT: SMA4 < SMA16 and RSI14 < RSI52 and RSI14 <= 50"
+
+    missing_long = []
+    if not sma_bull:
+        missing_long.append("SMA4 > SMA16")
+    if not rsi_bull:
+        missing_long.append("RSI14 > RSI52")
+    if not bool(last["rsi14"] >= 50):
+        missing_long.append("RSI14 >= 50")
+
+    missing_short = []
+    if not sma_bear:
+        missing_short.append("SMA4 < SMA16")
+    if not rsi_bear:
+        missing_short.append("RSI14 < RSI52")
+    if not bool(last["rsi14"] <= 50):
+        missing_short.append("RSI14 <= 50")
+
+    return (
+        "SMA/RSI state NEUTRAL: directional conditions not met. "
+        f"LONG missing: {', '.join(missing_long) if missing_long else 'none'}; "
+        f"SHORT missing: {', '.join(missing_short) if missing_short else 'none'}"
+    )
