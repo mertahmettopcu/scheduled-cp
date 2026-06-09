@@ -1807,25 +1807,131 @@ def make_price_ema_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | Non
     return fig
 
 
+def add_rsi_signal_markers(
+    fig: go.Figure,
+    chart_df: pd.DataFrame,
+    marker_df: pd.DataFrame,
+    name_prefix: str = "1H SMA Pipeline Signal",
+) -> go.Figure:
+    # RSI panel signal arrows are visual references only.
+    # Official signal generation remains in the pipeline/core layer.
+    if chart_df.empty or marker_df is None or marker_df.empty:
+        return fig
+
+    required_cols = {"open_time", "display_time", "rsi14"}
+    if not required_cols.issubset(set(chart_df.columns)):
+        return fig
+
+    work = chart_df.copy()
+    work["open_time"] = pd.to_datetime(work["open_time"], errors="coerce", utc=True)
+
+    markers = marker_df.copy()
+    markers["open_time"] = pd.to_datetime(markers["open_time"], errors="coerce", utc=True)
+
+    keep_cols = ["open_time", "display_time", "rsi4", "rsi14", "rsi52"]
+    keep_cols = [col for col in keep_cols if col in work.columns]
+
+    merged = markers.merge(
+        work[keep_cols],
+        on="open_time",
+        how="inner",
+    ).dropna(subset=["rsi14"])
+
+    if merged.empty:
+        return fig
+
+    long_markers = merged[merged["signal_type"] == "LONG"].copy()
+    short_markers = merged[merged["signal_type"] == "SHORT"].copy()
+
+    custom_cols = [col for col in ["signal_type", "rsi4", "rsi14", "rsi52"] if col in merged.columns]
+
+    if not long_markers.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=long_markers["display_time"],
+                y=long_markers["rsi14"],
+                mode="markers",
+                marker=dict(symbol="triangle-up", size=13, color="green"),
+                name=f"{name_prefix} LONG",
+                showlegend=False,
+                customdata=long_markers[custom_cols],
+                hovertemplate=(
+                    f"{name_prefix}<br>"
+                    "Signal: %{customdata[0]}<br>"
+                    "Time: %{x}<br>"
+                    "RSI4: %{customdata[1]:.2f}<br>"
+                    "RSI14: %{customdata[2]:.2f}<br>"
+                    "RSI52: %{customdata[3]:.2f}<br>"
+                    "<extra></extra>"
+                ),
+            )
+        )
+
+    if not short_markers.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=short_markers["display_time"],
+                y=short_markers["rsi14"],
+                mode="markers",
+                marker=dict(symbol="triangle-down", size=13, color="red"),
+                name=f"{name_prefix} SHORT",
+                showlegend=False,
+                customdata=short_markers[custom_cols],
+                hovertemplate=(
+                    f"{name_prefix}<br>"
+                    "Signal: %{customdata[0]}<br>"
+                    "Time: %{x}<br>"
+                    "RSI4: %{customdata[1]:.2f}<br>"
+                    "RSI14: %{customdata[2]:.2f}<br>"
+                    "RSI52: %{customdata[3]:.2f}<br>"
+                    "<extra></extra>"
+                ),
+            )
+        )
+
+    return fig
+
+
 # 1H RSI panel shown directly under the 1H price chart.
-# RSI values are calculated in add_ema_rsi(); this function only renders RSI4/RSI14/RSI52.
-def make_1h_rsi_chart(df: pd.DataFrame, title: str) -> go.Figure:
+# RSI values are calculated in add_ema_rsi(); this function renders RSI4/RSI14/RSI52.
+# Signal arrows and momentum highlights are copied as visual references from the official 1H chart context.
+def make_1h_rsi_chart(
+    df: pd.DataFrame,
+    title: str,
+    zones: pd.DataFrame | None = None,
+    signal_markers: pd.DataFrame | None = None,
+    show_signal_markers: bool = False,
+    show_momentum: bool = False,
+    momentum_threshold_pct: float = 35.0,
+    momentum_reference_events: pd.DataFrame | None = None,
+) -> go.Figure:
     plot_df = df.copy()
 
     if plot_df.empty:
         fig = go.Figure()
         fig.update_layout(
             title=title,
-            height=240,
+            height=260,
             xaxis_title="Time",
             yaxis_title="RSI",
-            yaxis=dict(range=[0, 100], tickmode="array", tickvals=[30, 50, 70]),
+            yaxis=dict(range=[0, 100], tickmode="array", tickvals=[20, 30, 50, 70, 80.5]),
         )
         return fig
 
     plot_df["display_time"] = plot_df["open_time"].dt.tz_convert(DISPLAY_TZ)
 
     fig = go.Figure()
+
+    # Momentum shading uses the same open-based zone-distance logic as the 1H price chart.
+    # It is drawn before RSI lines so RSI remains visually dominant.
+    fig = add_momentum_highlights(
+        fig=fig,
+        chart_df=plot_df,
+        zones=zones,
+        marker_df=momentum_reference_events if momentum_reference_events is not None else pd.DataFrame(),
+        show_momentum=show_momentum,
+        momentum_threshold_pct=momentum_threshold_pct,
+    )
 
     rsi_specs = (
         ("rsi4", "RSI4", "#f1c40f"),
@@ -1848,12 +1954,22 @@ def make_1h_rsi_chart(df: pd.DataFrame, title: str) -> go.Figure:
             )
         )
 
-    for level in (30, 50, 70):
+    for level in (20, 30, 50, 70, 80.5):
         fig.add_hline(
             y=level,
             line_width=1,
             line_dash="dot",
             opacity=0.35,
+            annotation_text=f"{level:g}",
+            annotation_position="right",
+        )
+
+    if show_signal_markers and signal_markers is not None and not signal_markers.empty:
+        fig = add_rsi_signal_markers(
+            fig=fig,
+            chart_df=plot_df,
+            marker_df=signal_markers,
+            name_prefix="1H SMA Pipeline Signal",
         )
 
     fig.update_layout(
@@ -1863,9 +1979,9 @@ def make_1h_rsi_chart(df: pd.DataFrame, title: str) -> go.Figure:
         yaxis=dict(
             range=[0, 100],
             tickmode="array",
-            tickvals=[30, 50, 70],
+            tickvals=[20, 30, 50, 70, 80.5],
         ),
-        height=260,
+        height=280,
         hovermode="x unified",
         legend_orientation="h",
         legend_yanchor="bottom",
@@ -2325,6 +2441,12 @@ st.plotly_chart(
     make_1h_rsi_chart(
         hourly_chart,
         f"{selected_pair} 1H — RSI4 / RSI14 / RSI52",
+        zones=manual_zones,
+        signal_markers=hourly_signal_markers,
+        show_signal_markers=show_signal_markers_1h,
+        show_momentum=show_momentum_1h,
+        momentum_threshold_pct=momentum_threshold_pct,
+        momentum_reference_events=hourly_signal_reference_events,
     ),
     use_container_width=True,
     config=PLOTLY_CONFIG,
