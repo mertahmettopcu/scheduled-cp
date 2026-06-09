@@ -40,7 +40,7 @@ jobs:
           else
             pip install requests pandas numpy supabase python-dotenv httpx
           fi
-          
+
       - name: Prepare active symbol list
         env:
           GOOGLE_SHEETS_SYMBOLS_CSV_URL: ${{ vars.GOOGLE_SHEETS_SYMBOLS_CSV_URL }}
@@ -53,28 +53,6 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: python sync_manual_zones.py
-        
-      - name: Write tunnel config
-        shell: bash
-        env:
-          VPN_OVPN: ${{ secrets.VPN_OVPN }}
-        run: |
-          set -euo pipefail
-
-          if [ -z "${VPN_OVPN:-}" ]; then
-            echo "::error ::Missing VPN_OVPN secret."
-            exit 1
-          fi
-
-          printf '%s' "$VPN_OVPN" > vpnbook.ovpn
-
-          grep -qi '^auth-user-pass' vpnbook.ovpn || echo 'auth-user-pass vpn-auth.txt' >> vpnbook.ovpn
-          grep -qi '^auth-nocache' vpnbook.ovpn || echo 'auth-nocache' >> vpnbook.ovpn
-          grep -qi '^remote-cert-tls' vpnbook.ovpn || echo 'remote-cert-tls server' >> vpnbook.ovpn
-          grep -qi '^pull-filter ignore "block-outside-dns"' vpnbook.ovpn || echo 'pull-filter ignore "block-outside-dns"' >> vpnbook.ovpn
-          grep -qi '^allow-compression no' vpnbook.ovpn || echo 'allow-compression no' >> vpnbook.ovpn
-
-          chmod 600 vpnbook.ovpn
 
       - name: Fetch VPNBook credentials
         shell: bash
@@ -137,7 +115,7 @@ jobs:
 
           echo "VPN_USER=$VPN_USER_DYNAMIC" >> "$GITHUB_ENV"
           echo "VPN_PASS=$VPN_PASS_DYNAMIC" >> "$GITHUB_ENV"
-          
+
       - name: Write tunnel credentials
         shell: bash
         run: |
@@ -151,43 +129,13 @@ jobs:
           printf '%s\n%s\n' "$VPN_USER" "$VPN_PASS" > vpn-auth.txt
           chmod 600 vpn-auth.txt
 
-      - name: Start network tunnel
+      - name: Select working network tunnel
         shell: bash
+        env:
+          VPN_OVPN_1: ${{ secrets.VPN_OVPN }}
+          VPN_OVPN_2: ${{ secrets.VPN_OVPN_2 }}
         run: |
           set -euo pipefail
-
-          sudo openvpn \
-            --config vpnbook.ovpn \
-            --auth-user-pass vpn-auth.txt \
-            --auth-nocache \
-            --daemon \
-            --writepid /tmp/ovpn.pid \
-            --log /tmp/ovpn.log
-
-          for i in {1..45}; do
-            if sudo grep -q 'AUTH_FAILED' /tmp/ovpn.log; then
-              echo "::error ::Tunnel login failed."
-              exit 1
-            fi
-
-            if sudo grep -q 'Initialization Sequence Completed' /tmp/ovpn.log; then
-              echo "Tunnel connected."
-              break
-            fi
-
-            sleep 2
-          done
-
-          if ! sudo grep -q 'Initialization Sequence Completed' /tmp/ovpn.log; then
-            echo "::error ::Tunnel did not connect in time."
-            exit 1
-          fi
-
-      - name: Check outbound connectivity
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "Checking outbound connectivity..."
 
           endpoints=(
             "https://api.ipify.org"
@@ -195,35 +143,125 @@ jobs:
             "https://icanhazip.com"
           )
 
-          success=0
-          ip_output=""
+          cleanup_tunnel() {
+            if [ -f /tmp/ovpn.pid ]; then
+              sudo kill "$(cat /tmp/ovpn.pid)" || true
+              rm -f /tmp/ovpn.pid
+              sleep 2
+            fi
+            sudo pkill -x openvpn || true
+          }
 
-          for endpoint in "${endpoints[@]}"; do
-            echo "Trying endpoint: $endpoint"
+          prepare_config() {
+            local config_value="$1"
 
-            for i in 1 2 3; do
-              if ip_output="$(curl --fail --silent --show-error --max-time 20 "$endpoint")"; then
-                ip_output="$(echo "$ip_output" | tr -d '\r' | tr -d '\n' | xargs)"
-                if [ -n "$ip_output" ]; then
-                  echo "Public IP check succeeded: $ip_output"
-                  success=1
-                  break
-                fi
+            printf '%s' "$config_value" > vpnbook.ovpn
+
+            if grep -qi '^auth-user-pass' vpnbook.ovpn; then
+              sed -i -E 's|^auth-user-pass([[:space:]].*)?$|auth-user-pass vpn-auth.txt|' vpnbook.ovpn
+            else
+              echo 'auth-user-pass vpn-auth.txt' >> vpnbook.ovpn
+            fi
+
+            grep -qi '^auth-nocache' vpnbook.ovpn || echo 'auth-nocache' >> vpnbook.ovpn
+            grep -qi '^remote-cert-tls' vpnbook.ovpn || echo 'remote-cert-tls server' >> vpnbook.ovpn
+            grep -qi '^pull-filter ignore "block-outside-dns"' vpnbook.ovpn || echo 'pull-filter ignore "block-outside-dns"' >> vpnbook.ovpn
+            grep -qi '^allow-compression no' vpnbook.ovpn || echo 'allow-compression no' >> vpnbook.ovpn
+
+            chmod 600 vpnbook.ovpn
+          }
+
+          start_tunnel() {
+            rm -f /tmp/ovpn.log /tmp/ovpn.pid
+
+            sudo openvpn \
+              --config vpnbook.ovpn \
+              --auth-user-pass vpn-auth.txt \
+              --auth-nocache \
+              --daemon \
+              --writepid /tmp/ovpn.pid \
+              --log /tmp/ovpn.log
+
+            for i in {1..45}; do
+              if sudo grep -q 'AUTH_FAILED' /tmp/ovpn.log; then
+                echo "Tunnel login failed."
+                return 1
               fi
 
-              echo "IP check failed for $endpoint (attempt $i), retrying..."
-              sleep $((i * 2))
+              if sudo grep -q 'Initialization Sequence Completed' /tmp/ovpn.log; then
+                echo "Tunnel connected."
+                return 0
+              fi
+
+              sleep 2
             done
 
-            if [ "$success" -eq 1 ]; then
+            echo "Tunnel did not connect in time."
+            return 1
+          }
+
+          check_connectivity() {
+            local ip_output=""
+
+            echo "Checking outbound connectivity..."
+
+            for endpoint in "${endpoints[@]}"; do
+              echo "Trying endpoint: $endpoint"
+
+              for i in 1 2 3; do
+                if ip_output="$(curl --fail --silent --show-error --max-time 20 "$endpoint")"; then
+                  ip_output="$(echo "$ip_output" | tr -d '\r' | tr -d '\n' | xargs)"
+                  if [ -n "$ip_output" ]; then
+                    echo "Public IP check succeeded: $ip_output"
+                    return 0
+                  fi
+                fi
+
+                echo "IP check failed for $endpoint (attempt $i), retrying..."
+                sleep $((i * 2))
+              done
+            done
+
+            echo "Connectivity check failed on all fallback endpoints."
+            return 1
+          }
+
+          configs=(
+            "$VPN_OVPN_1"
+            "$VPN_OVPN_2"
+          )
+
+          selected=0
+
+          for index in "${!configs[@]}"; do
+            config_value="${configs[$index]}"
+            config_number=$((index + 1))
+
+            if [ -z "${config_value:-}" ]; then
+              echo "VPN config $config_number is empty, skipping."
+              continue
+            fi
+
+            echo "Trying VPN config $config_number..."
+
+            cleanup_tunnel
+            prepare_config "$config_value"
+
+            if start_tunnel && check_connectivity; then
+              echo "Selected VPN config $config_number."
+              selected=1
               break
             fi
+
+            echo "VPN config $config_number failed. Trying next config..."
+            echo "Last OpenVPN log lines:"
+            sudo tail -n 60 /tmp/ovpn.log || true
+
+            cleanup_tunnel
           done
 
-          if [ "$success" -ne 1 ]; then
-            echo "::error ::Connectivity check failed on all fallback endpoints. Stopping before Binance fetch."
-            echo "Last OpenVPN log lines:"
-            sudo tail -n 80 /tmp/ovpn.log || true
+          if [ "$selected" -ne 1 ]; then
+            echo "::error ::All VPN configs failed. Stopping before Binance fetch."
             exit 1
           fi
 
