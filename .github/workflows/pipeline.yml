@@ -208,7 +208,7 @@ jobs:
             for endpoint in "${endpoints[@]}"; do
               echo "Trying endpoint: $endpoint"
           
-              for i in 1 ; do
+              for i in 1 2; do
                 if ip_output="$(curl --fail --silent --show-error --max-time 10 "$endpoint")"; then
                   ip_output="$(echo "$ip_output" | tr -d '\r' | tr -d '\n' | xargs)"
                   if [ -n "$ip_output" ]; then
