@@ -905,6 +905,12 @@ def ema_with_sma_seed(series: pd.Series, length: int) -> pd.Series:
     return result
 
 
+# Dashboard-only indicator calculations.
+# Official pipeline signals are still produced by process_and_publish.py / core logic.
+# This helper prepares chart-side EMA/SMA/RSI columns for display.
+# RSI4 is currently calculated only for dashboard visualization, especially the 1H RSI panel.
+# It is NOT part of official signal generation, Telegram notifications, or Supabase snapshots yet.
+# If RSI4 becomes part of the strategy later, move/duplicate the calculation into the pipeline/core indicator layer.
 def add_ema_rsi(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
 
@@ -933,6 +939,7 @@ def add_ema_rsi(df: pd.DataFrame) -> pd.DataFrame:
         rs = avg_gain / avg_loss.replace(0, pd.NA)
         return 100 - (100 / (1 + rs))
 
+    out["rsi4"] = _rsi(4)
     out["rsi14"] = _rsi(14)
     out["rsi52"] = _rsi(52)
     out["ema4_slope"] = out["ema4"].diff()
@@ -1800,6 +1807,77 @@ def make_price_ema_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | Non
     return fig
 
 
+# 1H RSI panel shown directly under the 1H price chart.
+# RSI values are calculated in add_ema_rsi(); this function only renders RSI4/RSI14/RSI52.
+def make_1h_rsi_chart(df: pd.DataFrame, title: str) -> go.Figure:
+    plot_df = df.copy()
+
+    if plot_df.empty:
+        fig = go.Figure()
+        fig.update_layout(
+            title=title,
+            height=240,
+            xaxis_title="Time",
+            yaxis_title="RSI",
+            yaxis=dict(range=[0, 100], tickmode="array", tickvals=[30, 50, 70]),
+        )
+        return fig
+
+    plot_df["display_time"] = plot_df["open_time"].dt.tz_convert(DISPLAY_TZ)
+
+    fig = go.Figure()
+
+    rsi_specs = (
+        ("rsi4", "RSI4", "#f1c40f"),
+        ("rsi14", "RSI14", "#9b59b6"),
+        ("rsi52", "RSI52", "#e74c3c"),
+    )
+
+    for column, name, color in rsi_specs:
+        if column not in plot_df.columns:
+            continue
+
+        fig.add_trace(
+            go.Scatter(
+                x=plot_df["display_time"],
+                y=plot_df[column],
+                mode="lines",
+                name=name,
+                line=dict(color=color, width=2),
+                hovertemplate=f"{name}: %{{y:.2f}}<extra></extra>",
+            )
+        )
+
+    for level in (30, 50, 70):
+        fig.add_hline(
+            y=level,
+            line_width=1,
+            line_dash="dot",
+            opacity=0.35,
+        )
+
+    fig.update_layout(
+        title="",
+        xaxis_title="Time",
+        yaxis_title="RSI",
+        yaxis=dict(
+            range=[0, 100],
+            tickmode="array",
+            tickvals=[30, 50, 70],
+        ),
+        height=260,
+        hovermode="x unified",
+        legend_orientation="h",
+        legend_yanchor="bottom",
+        legend_y=1.02,
+        legend_xanchor="left",
+        legend_x=0,
+        margin=dict(l=40, r=20, t=20, b=40),
+    )
+
+    return fig
+
+
 def make_ichimoku_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | None = None, show_zones: bool = False,zone_buffer: float = 0.0, signal_markers: pd.DataFrame | None = None, show_signal_markers: bool = False, tp_signal_events: pd.DataFrame | None = None, show_tp_lines: bool = True,) -> go.Figure:
     plot_df = df.copy()
     plot_df["display_time"] = plot_df["open_time"].dt.tz_convert(DISPLAY_TZ)
@@ -2238,6 +2316,15 @@ st.plotly_chart(
         momentum_threshold_pct=momentum_threshold_pct,
         momentum_reference_events=hourly_signal_reference_events,
         counter_momentum_states=counter_momentum_states if show_momentum_1h else pd.DataFrame(),
+    ),
+    use_container_width=True,
+    config=PLOTLY_CONFIG,
+)
+
+st.plotly_chart(
+    make_1h_rsi_chart(
+        hourly_chart,
+        f"{selected_pair} 1H — RSI4 / RSI14 / RSI52",
     ),
     use_container_width=True,
     config=PLOTLY_CONFIG,
