@@ -146,7 +146,7 @@ jobs:
           cleanup_tunnel() {
             if [ -f /tmp/ovpn.pid ]; then
               sudo kill "$(cat /tmp/ovpn.pid)" || true
-              rm -f /tmp/ovpn.pid
+              sudo rm -f /tmp/ovpn.pid
               sleep 2
             fi
             sudo pkill -x openvpn || true
