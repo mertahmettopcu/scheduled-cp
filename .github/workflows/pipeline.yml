@@ -172,7 +172,7 @@ jobs:
           }
 
           start_tunnel() {
-            rm -f /tmp/ovpn.log /tmp/ovpn.pid
+            sudo rm -f /tmp/ovpn.log /tmp/ovpn.pid
 
             sudo openvpn \
               --config vpnbook.ovpn \
