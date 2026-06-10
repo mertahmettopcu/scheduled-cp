@@ -1532,7 +1532,7 @@ def add_ichimoku_tp_segments(
                 x=[x0_display, x1_display],
                 y=[tp_level, tp_level],
                 mode="lines",
-                line=dict(color="yellow", width=2),
+                line=dict(color="#D4A000", width=3),
                 name="Ichimoku TP",
                 showlegend=False,
                 customdata=[[signal_type, tp_level, tp_status]],
