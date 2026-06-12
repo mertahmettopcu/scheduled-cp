@@ -40,6 +40,8 @@ from core_utils import (
     upsert_in_chunks,
 )
 
+from strategy_1h import get_last_directional_reference, run_live_1h_strategy
+
 INPUT_FILE = Path("binance_data.json")
 STREAMLIT_APP_URL = os.getenv("STREAMLIT_APP_URL", "")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -811,7 +813,7 @@ def run() -> None:
             if manual_zones.empty:
                 log(f"  └─ Counter momentum skipped for {pair}: no active manual zones")
             else:
-                reference = get_last_directional_sma_rsi_reference(closed_1h_df)
+                reference = get_last_directional_reference(closed_1h_df)
                 reference_signal = normalize_signal(reference.get("signal"))
                 reference_signal_time = reference.get("signal_time")
 
@@ -878,6 +880,36 @@ def run() -> None:
         else:
             log(f"  └─ Counter momentum skipped for {pair}: no separate open 1h candle")
 
+        # -------------------------------------------------
+        # Live 1H position strategy
+        # -------------------------------------------------
+        # The engine processes each closed 1H candle only once, keeps the live
+        # position state in Supabase, updates dynamic Zone/SMA TP at candle open,
+        # and returns detailed Telegram event messages.
+        manual_zones_for_strategy = fetch_active_manual_zones(supabase, pair)
+
+        if manual_zones_for_strategy.empty:
+            log(f"  └─ Live 1H strategy skipped for {pair}: no active manual zones")
+        else:
+            separate_open_1h_row = None
+            if pd.Timestamp(open_1h_row["open_time"]) > pd.Timestamp(latest_closed_1h_row["open_time"]):
+                separate_open_1h_row = open_1h_row
+
+            strategy_1h_messages = run_live_1h_strategy(
+                supabase=supabase,
+                pair=pair,
+                closed_1h_df=closed_1h_df,
+                open_1h_row=separate_open_1h_row,
+                zones=manual_zones_for_strategy,
+            )
+            notification_messages.extend(strategy_1h_messages)
+
+            if strategy_1h_messages:
+                log(
+                    f"  └─ Live 1H strategy produced "
+                    f"{len(strategy_1h_messages)} event message(s) for {pair}"
+                )
+
         has_previous_snapshot = (
             prev_15m is not None
             or prev_1h is not None
@@ -889,11 +921,10 @@ def run() -> None:
         # -------------------------------------------------
         # 1H tarafını şimdilik eski genel mesaj formatıyla koruyoruz.
         # 1D değişimi için özel Ichimoku lifecycle mesajları aşağıda üretilecek.
-        triggered_1h_directional = (
-            has_previous_snapshot
-            and changed_1h
-            and normalize_signal(snap_1h["signal"]) in {"LONG", "SHORT"}
-        )
+        # Detailed position-event messages are now produced by strategy_1h.py.
+        # Keep the legacy builder available for 1D/other uses, but disable the
+        # old generic 1H signal message to prevent duplicate Telegram messages.
+        triggered_1h_directional = False
 
         if triggered_1h_directional:
             legacy_1h_message = build_telegram_message(
