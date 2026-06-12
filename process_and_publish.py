@@ -909,6 +909,11 @@ def run() -> None:
                     f"  └─ Live 1H strategy produced "
                     f"{len(strategy_1h_messages)} event message(s) for {pair}"
                 )
+            else:
+                log(
+                    f"  └─ Live 1H strategy checked for {pair}: "
+                    "no new position/TP event message"
+                )
 
         has_previous_snapshot = (
             prev_15m is not None
