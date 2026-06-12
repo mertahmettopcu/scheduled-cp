@@ -1,3 +1,4 @@
+import json
 import os
 import re
 
@@ -883,6 +884,126 @@ def load_counter_momentum_states(pair: str) -> pd.DataFrame:
     )
 
 
+@st.cache_data(ttl=60)
+def load_strategy_1h_state(pair: str) -> pd.DataFrame:
+    r = (
+        supabase.table("strategy_1h_states")
+        .select("*")
+        .eq("pair", pair)
+        .limit(1)
+        .execute()
+    )
+
+    df = pd.DataFrame(r.data or [])
+    if df.empty:
+        return df
+
+    time_cols = [
+        "entry_time",
+        "tp_candle_open_time",
+        "pending_tp_hit_time",
+        "last_processed_closed_open_time",
+        "created_at",
+        "updated_at",
+    ]
+    for col in time_cols:
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors="coerce", utc=True)
+
+    numeric_cols = [
+        "entry_price",
+        "active_lower_zone",
+        "active_upper_zone",
+        "target_zone",
+        "tp_raw_value",
+        "tp_trigger",
+        "pending_tp_exit_price",
+        "pending_tp_raw_value",
+        "pending_tp_trigger",
+        "pending_old_target_zone",
+    ]
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    return df
+
+
+@st.cache_data(ttl=60)
+def load_strategy_1h_events(pair: str, limit: int = 500) -> pd.DataFrame:
+    r = (
+        supabase.table("strategy_1h_events")
+        .select("*")
+        .eq("pair", pair)
+        .order("event_time", desc=True)
+        .limit(limit)
+        .execute()
+    )
+
+    df = pd.DataFrame(r.data or [])
+    if df.empty:
+        return df
+
+    for col in ["event_time", "created_at"]:
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors="coerce", utc=True)
+
+    numeric_cols = [
+        "price",
+        "active_lower_zone",
+        "active_upper_zone",
+        "target_zone",
+        "tp_raw_value",
+        "tp_trigger",
+    ]
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    return df.sort_values("event_time").reset_index(drop=True)
+
+
+@st.cache_data(ttl=60)
+def load_strategy_1h_tp_history(pair: str, limit: int = 1000) -> pd.DataFrame:
+    r = (
+        supabase.table("strategy_1h_tp_history")
+        .select("*")
+        .eq("pair", pair)
+        .order("candle_open_time", desc=True)
+        .limit(limit)
+        .execute()
+    )
+
+    df = pd.DataFrame(r.data or [])
+    if df.empty:
+        return df
+
+    for col in ["candle_open_time", "created_at"]:
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors="coerce", utc=True)
+
+    numeric_cols = [
+        "tp_raw_value",
+        "tp_trigger",
+        "target_zone",
+        "active_lower_zone",
+        "active_upper_zone",
+    ]
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    return df.sort_values(["trade_id", "candle_open_time"]).reset_index(drop=True)
+
+
+def _details_text(value) -> str:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return ""
+    if isinstance(value, dict):
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return str(value)
+
+
 # =========================================================
 # Indicator helpers
 # =========================================================
@@ -1660,13 +1781,349 @@ def add_counter_momentum_hover_context(
     return merged
 
 
-def make_price_ema_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | None = None, show_zones: bool = False, zone_buffer: float = 0.0,ma_display: str = "EMA",signal_markers: pd.DataFrame | None = None,
+
+def add_live_strategy_event_markers(
+    fig: go.Figure,
+    chart_df: pd.DataFrame,
+    events: pd.DataFrame | None,
+    show_markers: bool = True,
+) -> go.Figure:
+    if not show_markers or chart_df.empty or events is None or events.empty:
+        return fig
+
+    work = chart_df.copy()
+    work["open_time"] = pd.to_datetime(work["open_time"], errors="coerce", utc=True)
+    work = work.dropna(subset=["open_time"]).sort_values("open_time")
+    if work.empty:
+        return fig
+
+    event_work = events.copy()
+    event_work["event_time"] = pd.to_datetime(event_work["event_time"], errors="coerce", utc=True)
+    event_work = event_work.dropna(subset=["event_time"])
+    if event_work.empty:
+        return fig
+
+    visible_start = work["open_time"].min()
+    visible_end = work["close_time"].max() if "close_time" in work.columns else work["open_time"].max() + pd.Timedelta(hours=1)
+    event_work = event_work[
+        (event_work["event_time"] >= visible_start)
+        & (event_work["event_time"] <= visible_end)
+    ].copy()
+    if event_work.empty:
+        return fig
+
+    event_work["display_time"] = event_work["event_time"].dt.tz_convert(DISPLAY_TZ)
+    event_work["reason_text"] = event_work.get("reason", pd.Series(index=event_work.index, dtype="object")).fillna("").astype(str)
+    event_work["details_text"] = event_work.get("details", pd.Series(index=event_work.index, dtype="object")).apply(_details_text)
+    event_work["price"] = pd.to_numeric(event_work.get("price"), errors="coerce")
+
+    offset = _chart_price_offset(work, ratio=0.028)
+
+    opens = event_work[event_work["event_type"].eq("POSITION_OPEN")].copy()
+    if not opens.empty:
+        long_opens = opens[opens["direction"].astype(str).str.upper().eq("LONG")]
+        short_opens = opens[opens["direction"].astype(str).str.upper().eq("SHORT")]
+
+        for subset, symbol, color, y_adjust, name in [
+            (long_opens, "triangle-up", "#00A65A", -offset, "Live LONG entry"),
+            (short_opens, "triangle-down", "#D62728", offset, "Live SHORT entry"),
+        ]:
+            if subset.empty:
+                continue
+            y = subset["price"] + y_adjust
+            fig.add_trace(
+                go.Scatter(
+                    x=subset["display_time"],
+                    y=y,
+                    mode="markers",
+                    marker=dict(symbol=symbol, size=15, color=color, line=dict(width=1, color="white")),
+                    name=name,
+                    showlegend=False,
+                    customdata=subset[["direction", "price", "reason_text", "target_zone", "details_text"]],
+                    hovertemplate=(
+                        f"{name}<br>"
+                        "Direction: %{customdata[0]}<br>"
+                        "Entry: %{customdata[1]:.2f}<br>"
+                        "Reason: %{customdata[2]}<br>"
+                        "Target zone: %{customdata[3]:.2f}<br>"
+                        "Details: %{customdata[4]}<br>"
+                        "Time: %{x}<extra></extra>"
+                    ),
+                )
+            )
+
+    tp_hits = event_work[event_work["event_type"].eq("TP_HIT")].copy()
+    if not tp_hits.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=tp_hits["display_time"],
+                y=tp_hits["price"],
+                mode="markers",
+                marker=dict(symbol="star", size=14, color="#D4A000", line=dict(width=1, color="black")),
+                name="Live TP hit",
+                showlegend=False,
+                customdata=tp_hits[["direction", "price", "reason_text", "tp_source", "tp_raw_value", "tp_trigger", "details_text"]],
+                hovertemplate=(
+                    "Live TP hit<br>"
+                    "Closed direction: %{customdata[0]}<br>"
+                    "Exit price: %{customdata[1]:.2f}<br>"
+                    "Reason: %{customdata[2]}<br>"
+                    "TP source: %{customdata[3]}<br>"
+                    "TP raw value: %{customdata[4]:.2f}<br>"
+                    "TP trigger: %{customdata[5]:.2f}<br>"
+                    "Details: %{customdata[6]}<br>"
+                    "Time: %{x}<extra></extra>"
+                ),
+            )
+        )
+
+    closes = event_work[event_work["event_type"].eq("POSITION_CLOSE")].copy()
+    if not closes.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=closes["display_time"],
+                y=closes["price"],
+                mode="markers",
+                marker=dict(symbol="x", size=11, color="#4D4D4D", line=dict(width=2)),
+                name="Live position close",
+                showlegend=False,
+                customdata=closes[["direction", "price", "reason_text", "details_text"]],
+                hovertemplate=(
+                    "Live position close<br>"
+                    "Closed direction: %{customdata[0]}<br>"
+                    "Exit price: %{customdata[1]:.2f}<br>"
+                    "Reason: %{customdata[2]}<br>"
+                    "Details: %{customdata[3]}<br>"
+                    "Time: %{x}<extra></extra>"
+                ),
+            )
+        )
+
+    held = event_work[event_work["event_type"].eq("POSITION_HELD")].copy()
+    if not held.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=held["display_time"],
+                y=held["price"],
+                mode="markers",
+                marker=dict(symbol="diamond-open", size=12, color="#9467BD", line=dict(width=2)),
+                name="Position held",
+                showlegend=False,
+                customdata=held[["direction", "price", "reason_text", "details_text"]],
+                hovertemplate=(
+                    "Position kept open<br>"
+                    "Direction: %{customdata[0]}<br>"
+                    "Price: %{customdata[1]:.2f}<br>"
+                    "Reason: %{customdata[2]}<br>"
+                    "Details: %{customdata[3]}<br>"
+                    "Time: %{x}<extra></extra>"
+                ),
+            )
+        )
+
+    return fig
+
+
+def add_live_strategy_tp_segments(
+    fig: go.Figure,
+    chart_df: pd.DataFrame,
+    tp_history: pd.DataFrame | None,
+    events: pd.DataFrame | None,
+    state: pd.DataFrame | None,
+    show_lines: bool = True,
+) -> go.Figure:
+    if not show_lines or chart_df.empty or tp_history is None or tp_history.empty:
+        return fig
+
+    work = chart_df.copy()
+    work["open_time"] = pd.to_datetime(work["open_time"], errors="coerce", utc=True)
+    work = work.dropna(subset=["open_time"]).sort_values("open_time")
+    if work.empty:
+        return fig
+
+    history = tp_history.copy()
+    history["candle_open_time"] = pd.to_datetime(history["candle_open_time"], errors="coerce", utc=True)
+    history["tp_trigger"] = pd.to_numeric(history["tp_trigger"], errors="coerce")
+    history["tp_raw_value"] = pd.to_numeric(history["tp_raw_value"], errors="coerce")
+    history = history.dropna(subset=["candle_open_time", "tp_trigger", "trade_id"])
+    if history.empty:
+        return fig
+
+    visible_start = work["open_time"].min()
+    visible_end = work["open_time"].max() + pd.Timedelta(hours=1)
+
+    event_work = events.copy() if events is not None else pd.DataFrame()
+    if not event_work.empty:
+        event_work["event_time"] = pd.to_datetime(event_work["event_time"], errors="coerce", utc=True)
+
+    active_trade_id = None
+    if state is not None and not state.empty and str(state.iloc[0].get("status") or "").upper() in {"OPEN", "PENDING_TP_DECISION"}:
+        active_trade_id = state.iloc[0].get("trade_id")
+
+    for trade_id, trade_hist in history.groupby("trade_id", sort=False):
+        trade_hist = trade_hist.sort_values("candle_open_time").reset_index(drop=True)
+
+        trade_end = pd.NaT
+        if not event_work.empty:
+            terminal = event_work[
+                event_work["trade_id"].astype(str).eq(str(trade_id))
+                & event_work["event_type"].isin(["TP_HIT", "POSITION_CLOSE"])
+            ].sort_values("event_time")
+            if not terminal.empty:
+                trade_end = terminal.iloc[-1]["event_time"]
+
+        for i, row in trade_hist.iterrows():
+            start = row["candle_open_time"]
+            if i + 1 < len(trade_hist):
+                end = trade_hist.iloc[i + 1]["candle_open_time"]
+            elif pd.notna(trade_end):
+                end = trade_end
+            elif str(trade_id) == str(active_trade_id):
+                end = visible_end
+            else:
+                end = start + pd.Timedelta(hours=1)
+
+            if end < visible_start or start > visible_end:
+                continue
+
+            x0 = max(start, visible_start).tz_convert(DISPLAY_TZ)
+            x1 = min(end, visible_end).tz_convert(DISPLAY_TZ)
+            trigger = float(row["tp_trigger"])
+            source = str(row.get("tp_source") or "NA")
+
+            fig.add_trace(
+                go.Scatter(
+                    x=[x0, x1],
+                    y=[trigger, trigger],
+                    mode="lines",
+                    line=dict(color="#D4A000", width=3),
+                    name="Live strategy TP",
+                    showlegend=False,
+                    customdata=[[
+                        str(row.get("direction") or "NA"),
+                        source,
+                        row.get("tp_raw_value"),
+                        trigger,
+                        row.get("target_zone"),
+                        row.get("active_lower_zone"),
+                        row.get("active_upper_zone"),
+                    ]] * 2,
+                    hovertemplate=(
+                        "Live strategy TP<br>"
+                        "Direction: %{customdata[0]}<br>"
+                        "Source: %{customdata[1]}<br>"
+                        "Raw value: %{customdata[2]:.2f}<br>"
+                        "Trigger: %{customdata[3]:.2f}<br>"
+                        "Target zone: %{customdata[4]:.2f}<br>"
+                        "Active zone: %{customdata[5]:.2f} – %{customdata[6]:.2f}<br>"
+                        "Time: %{x}<extra></extra>"
+                    ),
+                )
+            )
+
+    return fig
+
+
+def add_live_strategy_trade_segments(
+    fig: go.Figure,
+    chart_df: pd.DataFrame,
+    events: pd.DataFrame | None,
+    state: pd.DataFrame | None,
+    show_segments: bool = True,
+) -> go.Figure:
+    if not show_segments or chart_df.empty or events is None or events.empty:
+        return fig
+
+    work = chart_df.copy()
+    work["open_time"] = pd.to_datetime(work["open_time"], errors="coerce", utc=True)
+    visible_start = work["open_time"].min()
+    visible_end = work["open_time"].max() + pd.Timedelta(hours=1)
+
+    ev = events.copy()
+    ev["event_time"] = pd.to_datetime(ev["event_time"], errors="coerce", utc=True)
+    ev["price"] = pd.to_numeric(ev["price"], errors="coerce")
+    ev = ev.dropna(subset=["event_time", "price", "trade_id"])
+
+    active_trade_id = None
+    if state is not None and not state.empty and str(state.iloc[0].get("status") or "").upper() == "OPEN":
+        active_trade_id = state.iloc[0].get("trade_id")
+
+    for trade_id, trade_events in ev.groupby("trade_id", sort=False):
+        trade_events = trade_events.sort_values("event_time")
+        opens = trade_events[trade_events["event_type"].eq("POSITION_OPEN")]
+        if opens.empty:
+            continue
+        entry = opens.iloc[0]
+
+        exits = trade_events[trade_events["event_type"].isin(["TP_HIT", "POSITION_CLOSE"])]
+        if not exits.empty:
+            exit_row = exits.iloc[-1]
+            end_time = exit_row["event_time"]
+            end_price = float(exit_row["price"])
+            status = str(exit_row["event_type"])
+        elif str(trade_id) == str(active_trade_id):
+            end_time = visible_end
+            end_price = float(work.iloc[-1]["close"])
+            status = "OPEN"
+        else:
+            continue
+
+        start_time = entry["event_time"]
+        if end_time < visible_start or start_time > visible_end:
+            continue
+
+        clipped_start = max(start_time, visible_start)
+        clipped_end = min(end_time, visible_end)
+        entry_price = float(entry["price"])
+
+        fig.add_trace(
+            go.Scatter(
+                x=[clipped_start.tz_convert(DISPLAY_TZ), clipped_end.tz_convert(DISPLAY_TZ)],
+                y=[entry_price, end_price],
+                mode="lines",
+                line=dict(width=1.5, dash="dot"),
+                name="Live trade path",
+                showlegend=False,
+                customdata=[[
+                    str(entry.get("direction") or "NA"),
+                    str(entry.get("reason") or ""),
+                    entry_price,
+                    end_price,
+                    status,
+                ]] * 2,
+                hovertemplate=(
+                    "Live trade path<br>"
+                    "Direction: %{customdata[0]}<br>"
+                    "Entry reason: %{customdata[1]}<br>"
+                    "Entry: %{customdata[2]:.2f}<br>"
+                    "Current/exit: %{customdata[3]:.2f}<br>"
+                    "Status: %{customdata[4]}<br>"
+                    "Time: %{x}<extra></extra>"
+                ),
+            )
+        )
+
+    return fig
+
+def make_price_ema_chart(
+    df: pd.DataFrame,
+    title: str,
+    zones: pd.DataFrame | None = None,
+    show_zones: bool = False,
+    zone_buffer: float = 0.0,
+    ma_display: str = "EMA",
+    signal_markers: pd.DataFrame | None = None,
     show_signal_markers: bool = False,
     signal_marker_name: str = "Signal",
     show_momentum: bool = False,
     momentum_threshold_pct: float = 35.0,
     momentum_reference_events: pd.DataFrame | None = None,
-    counter_momentum_states: pd.DataFrame | None = None,) -> go.Figure:
+    counter_momentum_states: pd.DataFrame | None = None,
+    live_strategy_state: pd.DataFrame | None = None,
+    live_strategy_events: pd.DataFrame | None = None,
+    live_strategy_tp_history: pd.DataFrame | None = None,
+    show_live_strategy: bool = False,
+) -> go.Figure:
         
     plot_df = df.copy()
     plot_df["display_time"] = plot_df["open_time"].dt.tz_convert(DISPLAY_TZ)
@@ -1791,6 +2248,29 @@ def make_price_ema_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | Non
         show_momentum=show_momentum,
         momentum_threshold_pct=momentum_threshold_pct,
     )
+
+    fig = add_live_strategy_trade_segments(
+        fig=fig,
+        chart_df=plot_df,
+        events=live_strategy_events,
+        state=live_strategy_state,
+        show_segments=show_live_strategy,
+    )
+    fig = add_live_strategy_tp_segments(
+        fig=fig,
+        chart_df=plot_df,
+        tp_history=live_strategy_tp_history,
+        events=live_strategy_events,
+        state=live_strategy_state,
+        show_lines=show_live_strategy,
+    )
+    fig = add_live_strategy_event_markers(
+        fig=fig,
+        chart_df=plot_df,
+        events=live_strategy_events,
+        show_markers=show_live_strategy,
+    )
+
     fig.update_layout(
         title="",
         xaxis_title="Time",
@@ -2270,8 +2750,12 @@ with st.expander("Gösterge açıklamaları", expanded=False):
 - **Normal momentum:** Gri/yeşilimsi dikey gölge.
 - **Counter momentum:** Kırmızı/pembe dikey gölge.
 - **Momentum hesabı:** `abs(close - open)`, mumun **open** fiyatının bulunduğu iki manual zone arasındaki mesafeye göre ölçülür. Buffer hesaba dahil edilmez.
-- **LONG sinyal:** Yeşil yukarı üçgen.
-- **SHORT sinyal:** Kırmızı aşağı üçgen.
+- **Resmî LONG/SHORT sinyali:** Eski yeşil/kırmızı üçgenler piyasa sinyal state değişimini gösterir.
+- **Canlı pozisyon girişi:** Beyaz kenarlı büyük yeşil/kırmızı üçgen.
+- **Canlı TP çizgisi:** Sarı basamaklı çizgi; Zone/SMA kaynağı hover içinde görünür.
+- **TP gerçekleşmesi:** Sarı yıldız.
+- **Pozisyon kapanışı:** Gri X.
+- **Counter-momentum + ters sinyal geldiği halde RSI4 onayı olmadığı için korunan pozisyon:** Mor boş elmas.
 - **15M sinyal referansı:** 15M'in kendi sinyali değildir; 1H sinyalinin 15M içi referans noktasıdır.
 - **1D Ichimoku TP/SL:** Sinyal mumunun kapanışı entry referansıdır. LONG için SL bulut alt sınırı, SHORT için SL bulut üst sınırıdır. TP = entry referansı ± {ichimoku_rr_multiplier:g} × SL mesafesi.
 - **1D Ichimoku TP çizgisi:** Sarı düz yatay çizgi. Sinyal marker mumunda görünür ama TP çizgisi yalnızca bir sonraki günlük mum aynı Ichimoku sinyal state'iyle kapanırsa çizilir. Çizgi sinyal mumundan başlar; TP'ye temas edilirse orada, TP'den önce zıt Ichimoku sinyali gelirse zıt sinyalde biter.
@@ -2284,6 +2768,9 @@ m15 = load_candles(selected_pair, "15m")
 daily = load_candles(selected_pair, "1d")
 manual_zones = load_manual_zones(selected_pair)
 counter_momentum_states = load_counter_momentum_states(selected_pair)
+strategy_1h_state = load_strategy_1h_state(selected_pair)
+strategy_1h_events = load_strategy_1h_events(selected_pair)
+strategy_1h_tp_history = load_strategy_1h_tp_history(selected_pair)
 
 if manual_zones.empty:
     st.info("Bu parite için aktif manual zone bulunamadı.")
@@ -2361,6 +2848,76 @@ daily_signal_markers = daily_signal_reference_events[
     daily_signal_reference_events["open_time"].isin(daily_chart["open_time"])
 ].copy()
 
+st.subheader("Live 1H strategy state")
+
+if strategy_1h_state.empty:
+    st.info("Live 1H strategy state kaydı henüz oluşmadı.")
+else:
+    live_state = strategy_1h_state.iloc[0]
+    live_status = str(live_state.get("status") or "NA").upper()
+    live_direction = str(live_state.get("direction") or "NA").upper()
+
+    state_cols = st.columns(5)
+    state_cols[0].metric("Status", live_status)
+    state_cols[1].metric("Direction", live_direction)
+    state_cols[2].metric("Entry", format(float(live_state["entry_price"]), ".2f") if pd.notna(live_state.get("entry_price")) else "NA")
+    state_cols[3].metric("Target zone", format(float(live_state["target_zone"]), ".2f") if pd.notna(live_state.get("target_zone")) else "NA")
+    state_cols[4].metric("TP", format(float(live_state["tp_trigger"]), ".2f") if pd.notna(live_state.get("tp_trigger")) else "NA")
+
+    state_detail_cols = st.columns(4)
+    state_detail_cols[0].caption(f"Entry reason: {live_state.get('entry_reason') or 'NA'}")
+    state_detail_cols[1].caption(
+        "Active zone: "
+        + (
+            f"{float(live_state['active_lower_zone']):.2f} – {float(live_state['active_upper_zone']):.2f}"
+            if pd.notna(live_state.get("active_lower_zone")) and pd.notna(live_state.get("active_upper_zone"))
+            else "NA"
+        )
+    )
+    state_detail_cols[2].caption(f"TP source: {live_state.get('tp_source') or 'NA'}")
+    state_detail_cols[3].caption(
+        "Last processed closed candle: "
+        + (_fmt_display_time(live_state.get("last_processed_closed_open_time")) or "NA")
+    )
+
+    if live_status == "PENDING_TP_DECISION":
+        st.warning(
+            "TP gerçekleşti; kapanan mum sonrası yeni pozisyon kararı bekleniyor. "
+            f"Closed direction: {live_state.get('pending_closed_direction') or 'NA'} | "
+            f"Exit: {float(live_state['pending_tp_exit_price']):.2f}"
+            if pd.notna(live_state.get("pending_tp_exit_price"))
+            else "TP gerçekleşti; kapanan mum sonrası yeni pozisyon kararı bekleniyor."
+        )
+
+with st.expander("Live 1H strategy event log", expanded=False):
+    if strategy_1h_events.empty:
+        st.info("Henüz canlı strateji olayı yok.")
+    else:
+        event_view = strategy_1h_events.sort_values("event_time", ascending=False).copy()
+        event_view["event_time"] = event_view["event_time"].apply(_fmt_display_time)
+        if "created_at" in event_view.columns:
+            event_view["created_at"] = event_view["created_at"].apply(_fmt_display_time)
+        if "details" in event_view.columns:
+            event_view["details"] = event_view["details"].apply(_details_text)
+
+        event_cols = [
+            "event_time",
+            "event_type",
+            "trade_id",
+            "direction",
+            "price",
+            "reason",
+            "active_lower_zone",
+            "active_upper_zone",
+            "target_zone",
+            "tp_source",
+            "tp_raw_value",
+            "tp_trigger",
+            "details",
+        ]
+        event_cols = [c for c in event_cols if c in event_view.columns]
+        st.dataframe(event_view[event_cols].head(100), use_container_width=True)
+
 if not snapshots.empty:
     st.subheader("Latest signal snapshot")
     snap_view = snapshots.copy()
@@ -2406,16 +2963,19 @@ if not snapshots.empty:
 
 st.subheader(f"{selected_pair} — 1H (son 2 gün)")
 
-col_1h_a, col_1h_b, col_1h_c = st.columns(3)
+col_1h_a, col_1h_b, col_1h_c, col_1h_d = st.columns(4)
 
 with col_1h_a:
     show_zones_1h = st.toggle("1H yakın zone çizgileri", value=True, key="show_zones_1h")
 
 with col_1h_b:
-    show_signal_markers_1h = st.toggle("1H sinyal markerları", value=True, key="show_signal_markers_1h")
+    show_signal_markers_1h = st.toggle("1H resmî sinyal markerları", value=True, key="show_signal_markers_1h")
 
 with col_1h_c:
     show_momentum_1h = st.toggle("1H momentum mumları", value=True, key="show_momentum_1h")
+
+with col_1h_d:
+    show_live_strategy_1h = st.toggle("1H canlı pozisyon ve TP", value=True, key="show_live_strategy_1h")
 
 st.plotly_chart(
     make_price_ema_chart(
@@ -2432,6 +2992,10 @@ st.plotly_chart(
         momentum_threshold_pct=momentum_threshold_pct,
         momentum_reference_events=hourly_signal_reference_events,
         counter_momentum_states=counter_momentum_states if show_momentum_1h else pd.DataFrame(),
+        live_strategy_state=strategy_1h_state,
+        live_strategy_events=strategy_1h_events,
+        live_strategy_tp_history=strategy_1h_tp_history,
+        show_live_strategy=show_live_strategy_1h,
     ),
     use_container_width=True,
     config=PLOTLY_CONFIG,
