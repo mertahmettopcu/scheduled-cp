@@ -275,6 +275,22 @@ def _fmt_display_time(ts):
     return ts.strftime("%Y-%m-%d %H:%M")
 
 
+def _to_utc_datetime_series(values):
+    try:
+        return pd.to_datetime(
+            values,
+            errors="coerce",
+            utc=True,
+            format="mixed",
+        )
+    except TypeError:
+        return pd.to_datetime(
+            values,
+            errors="coerce",
+            utc=True,
+        )
+
+
 def _safe_round(value, digits=4):
     if pd.isna(value):
         return None
@@ -946,7 +962,10 @@ def load_strategy_1h_events(pair: str, limit: int = 500) -> pd.DataFrame:
 
     for col in ["event_time", "created_at"]:
         if col in df.columns:
-            df[col] = pd.to_datetime(df[col], errors="coerce", utc=True)
+            df[col] = _to_utc_datetime_series(df[col])
+
+    if "event_time" in df.columns and "created_at" in df.columns:
+        df["event_time"] = df["event_time"].fillna(df["created_at"])
 
     numeric_cols = [
         "price",
@@ -1029,9 +1048,9 @@ def ema_with_sma_seed(series: pd.Series, length: int) -> pd.Series:
 # Dashboard-only indicator calculations.
 # Official pipeline signals are still produced by process_and_publish.py / core logic.
 # This helper prepares chart-side EMA/SMA/RSI columns for display.
-# RSI4 is currently calculated only for dashboard visualization, especially the 1H RSI panel.
-# It is NOT part of official signal generation, Telegram notifications, or Supabase snapshots yet.
-# If RSI4 becomes part of the strategy later, move/duplicate the calculation into the pipeline/core indicator layer.
+# RSI4 is shown on the dashboard and is also used by the separate live 1H strategy engine.
+# Official snapshot signal generation still uses SMA4/SMA16 + RSI14/RSI52 only.
+# Keep this dashboard-side calculation aligned with strategy_1h.py when changing RSI logic.
 def add_ema_rsi(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
 
@@ -1798,7 +1817,12 @@ def add_live_strategy_event_markers(
         return fig
 
     event_work = events.copy()
-    event_work["event_time"] = pd.to_datetime(event_work["event_time"], errors="coerce", utc=True)
+    event_work["event_time"] = _to_utc_datetime_series(event_work["event_time"])
+
+    if "created_at" in event_work.columns:
+        event_work["created_at"] = _to_utc_datetime_series(event_work["created_at"])
+        event_work["event_time"] = event_work["event_time"].fillna(event_work["created_at"])
+
     event_work = event_work.dropna(subset=["event_time"])
     if event_work.empty:
         return fig
@@ -1954,7 +1978,11 @@ def add_live_strategy_tp_segments(
 
     event_work = events.copy() if events is not None else pd.DataFrame()
     if not event_work.empty:
-        event_work["event_time"] = pd.to_datetime(event_work["event_time"], errors="coerce", utc=True)
+        event_work["event_time"] = _to_utc_datetime_series(event_work["event_time"])
+
+        if "created_at" in event_work.columns:
+            event_work["created_at"] = _to_utc_datetime_series(event_work["created_at"])
+            event_work["event_time"] = event_work["event_time"].fillna(event_work["created_at"])
 
     active_trade_id = None
     if state is not None and not state.empty and str(state.iloc[0].get("status") or "").upper() in {"OPEN", "PENDING_TP_DECISION"}:
@@ -2040,7 +2068,12 @@ def add_live_strategy_trade_segments(
     visible_end = work["open_time"].max() + pd.Timedelta(hours=1)
 
     ev = events.copy()
-    ev["event_time"] = pd.to_datetime(ev["event_time"], errors="coerce", utc=True)
+    ev["event_time"] = _to_utc_datetime_series(ev["event_time"])
+
+    if "created_at" in ev.columns:
+        ev["created_at"] = _to_utc_datetime_series(ev["created_at"])
+        ev["event_time"] = ev["event_time"].fillna(ev["created_at"])
+
     ev["price"] = pd.to_numeric(ev["price"], errors="coerce")
     ev = ev.dropna(subset=["event_time", "price", "trade_id"])
 
