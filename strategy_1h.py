@@ -24,6 +24,13 @@ NORMAL_REVERSE_SHORT_TO_LONG_RSI4_MAX = 70.0
 TP_AFTER_LONG_RSI4_MIN = 80.5
 TP_AFTER_SHORT_RSI4_MAX = 20.0
 SMA_LENGTHS = (65, 120, 168)
+TP_NEAR_LEVELS = (
+    ("L1", 25.0),
+    ("L2", 15.0),
+    ("L3", 7.5),
+    ("L4", 5.0),
+    ("L5", 1.0),
+)
 
 STATE_TABLE = "strategy_1h_states"
 EVENT_TABLE = "strategy_1h_events"
@@ -875,6 +882,171 @@ def _post_tp_decision(
     return state, messages
 
 
+
+def _tp_near_level_index(level: str) -> int:
+    for idx, (name, _) in enumerate(TP_NEAR_LEVELS, start=1):
+        if name == level:
+            return idx
+    return 0
+
+
+def _tp_near_candidate(state: Dict, row: pd.Series) -> Optional[Dict]:
+    if state.get("status") != "OPEN":
+        return None
+
+    direction = normalize_signal(state.get("direction"))
+    if direction not in {"LONG", "SHORT"}:
+        return None
+
+    entry_price = _safe_float(state.get("entry_price"))
+    trigger = _safe_float(state.get("tp_trigger"))
+    if entry_price is None or trigger is None:
+        return None
+
+    total_distance = abs(float(trigger) - float(entry_price))
+    if total_distance <= 0:
+        return None
+
+    if direction == "LONG":
+        observed_price = _safe_float(row.get("high"))
+        observed_label = "High"
+        remaining = float(trigger) - float(observed_price) if observed_price is not None else None
+    else:
+        observed_price = _safe_float(row.get("low"))
+        observed_label = "Low"
+        remaining = float(observed_price) - float(trigger) if observed_price is not None else None
+
+    if observed_price is None or remaining is None:
+        return None
+
+    # remaining <= 0 means TP is already touched or crossed; TP_HIT handles that case.
+    if remaining <= 0:
+        return None
+
+    remaining_pct = (remaining / total_distance) * 100.0
+    reached = [
+        (idx, name, threshold)
+        for idx, (name, threshold) in enumerate(TP_NEAR_LEVELS, start=1)
+        if remaining_pct <= float(threshold)
+    ]
+    if not reached:
+        return None
+
+    level_index, level, threshold = max(reached, key=lambda item: item[0])
+    progress_pct = max(0.0, min(100.0, 100.0 - remaining_pct))
+    return {
+        "level": level,
+        "level_index": level_index,
+        "threshold_remaining_pct": float(threshold),
+        "remaining": float(remaining),
+        "remaining_pct": float(remaining_pct),
+        "progress_pct": float(progress_pct),
+        "observed_price": float(observed_price),
+        "observed_label": observed_label,
+        "total_distance": float(total_distance),
+        "trigger": float(trigger),
+    }
+
+
+def _max_sent_tp_near_level(supabase, state: Dict, trigger: float) -> int:
+    try:
+        resp = (
+            supabase.table(EVENT_TABLE)
+            .select("reason,tp_trigger,details")
+            .eq("pair", state["pair"])
+            .eq("trade_id", state.get("trade_id"))
+            .eq("event_type", "TP_NEAR")
+            .limit(100)
+            .execute()
+        )
+    except Exception as exc:
+        log(f"TP_NEAR duplicate check failed for {state.get('pair')}: {exc}")
+        # Suppress alert if de-duplication cannot be checked; this avoids Telegram spam.
+        return len(TP_NEAR_LEVELS)
+
+    max_level = 0
+    for item in resp.data or []:
+        item_trigger = _safe_float(item.get("tp_trigger"))
+        if item_trigger is None or not math.isclose(float(item_trigger), float(trigger), rel_tol=0.0, abs_tol=1e-8):
+            continue
+
+        details = item.get("details") or {}
+        if isinstance(details, dict):
+            level_index = details.get("level_index")
+            if level_index is not None:
+                try:
+                    max_level = max(max_level, int(level_index))
+                    continue
+                except (TypeError, ValueError):
+                    pass
+
+        reason = str(item.get("reason") or "")
+        if reason.startswith("TP_NEAR_"):
+            max_level = max(max_level, _tp_near_level_index(reason.replace("TP_NEAR_", "")))
+
+    return max_level
+
+
+def _check_tp_near(
+    *,
+    supabase,
+    state: Dict,
+    row: pd.Series,
+) -> Optional[str]:
+    candidate = _tp_near_candidate(state, row)
+    if candidate is None:
+        return None
+
+    max_sent_level = _max_sent_tp_near_level(supabase, state, candidate["trigger"])
+    if candidate["level_index"] <= max_sent_level:
+        return None
+
+    reason = f"TP_NEAR_{candidate['level']}"
+    append_event(
+        supabase,
+        {
+            "pair": state["pair"],
+            "trade_id": state.get("trade_id"),
+            "event_type": "TP_NEAR",
+            "event_time": _iso(row["open_time"]),
+            "direction": state.get("direction"),
+            "price": candidate["observed_price"],
+            "reason": reason,
+            "active_lower_zone": state.get("active_lower_zone"),
+            "active_upper_zone": state.get("active_upper_zone"),
+            "target_zone": state.get("target_zone"),
+            "tp_source": state.get("tp_source"),
+            "tp_raw_value": state.get("tp_raw_value"),
+            "tp_trigger": state.get("tp_trigger"),
+            "details": {
+                "level": candidate["level"],
+                "level_index": candidate["level_index"],
+                "threshold_remaining_pct": candidate["threshold_remaining_pct"],
+                "remaining": candidate["remaining"],
+                "remaining_pct": candidate["remaining_pct"],
+                "progress_pct": candidate["progress_pct"],
+                "observed_label": candidate["observed_label"],
+                "observed_price": candidate["observed_price"],
+                "entry_price": state.get("entry_price"),
+                "total_distance": candidate["total_distance"],
+            },
+        },
+    )
+
+    return build_tp_near_message(
+        pair=state["pair"],
+        direction=state["direction"],
+        candle_time=row["open_time"],
+        level=candidate["level"],
+        source=state.get("tp_source"),
+        trigger=state.get("tp_trigger"),
+        observed_label=candidate["observed_label"],
+        observed_price=candidate["observed_price"],
+        remaining=candidate["remaining"],
+        progress_pct=candidate["progress_pct"],
+    )
+
+
 def _counter_rsi_approved(position_direction: str, rsi4: Optional[float]) -> bool:
     if rsi4 is None:
         return False
@@ -942,6 +1114,10 @@ def _process_closed_candle(
             )
             messages.extend(post_messages)
             return state, messages
+
+        tp_near_msg = _check_tp_near(supabase=supabase, state=state, row=row)
+        if tp_near_msg:
+            messages.append(tp_near_msg)
 
         opposite = "SHORT" if state["direction"] == "LONG" else "LONG"
         if official_signal == opposite:
@@ -1166,6 +1342,10 @@ def run_live_1h_strategy(
                 row=open_1h_row,
             )
             messages.append(hit_msg)
+        elif state.get("status") == "OPEN":
+            tp_near_msg = _check_tp_near(supabase=supabase, state=state, row=open_1h_row)
+            if tp_near_msg:
+                messages.append(tp_near_msg)
 
         state = save_state(supabase, state)
 
@@ -1190,6 +1370,11 @@ def _reason_description(reason: str) -> str:
         "NEAREST_VALID_SMA": "En yakın geçerli SMA TP",
         "TARGET_RANGE_UNAVAILABLE": "Target aralığı yok",
         "ZONE_CONTEXT_UNAVAILABLE": "Zone bağlamı yok",
+        "TP_NEAR_L1": "TP yakın L1",
+        "TP_NEAR_L2": "TP yakın L2",
+        "TP_NEAR_L3": "TP yakın L3",
+        "TP_NEAR_L4": "TP yakın L4",
+        "TP_NEAR_L5": "TP yakın L5",
     }
     text = descriptions.get(str(reason or ""))
     if text:
@@ -1326,6 +1511,33 @@ def build_tp_hit_message(
             f"Exit: {format_price(exit_price)}",
             f"TP: {source} @ {format_price(trigger)}",
             f"Target: {format_price(target_zone)}",
+            f"Time: {_iso(candle_time)}",
+        ]
+    )
+
+
+
+def build_tp_near_message(
+    *,
+    pair: str,
+    direction: str,
+    candle_time,
+    level: str,
+    source,
+    trigger,
+    observed_label: str,
+    observed_price: float,
+    remaining: float,
+    progress_pct: float,
+) -> str:
+    source_text = source or "TP"
+    return "\n".join(
+        [
+            f"🔔 {pair} 1H TP NEAR {level} {direction}",
+            f"TP: {source_text} @ {format_price(trigger)}",
+            f"{observed_label}: {format_price(observed_price)}",
+            f"Remaining: {format_price(remaining)}",
+            f"Progress: {progress_pct:.1f}%",
             f"Time: {_iso(candle_time)}",
         ]
     )
