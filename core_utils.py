@@ -658,57 +658,39 @@ def evaluate_counter_momentum(
 
 def build_counter_momentum_message(*, event: Dict, streamlit_app_url: str) -> str:
     pair = event.get("pair")
-    app_link = _build_app_link(pair, streamlit_app_url)
 
     status = str(event.get("status") or "").upper()
-    status_text = (
-        "Counter momentum threshold reached"
-        if status == "THRESHOLD_REACHED"
-        else "Counter momentum early warning"
+    status_label = "FULL" if status == "THRESHOLD_REACHED" else "EARLY"
+
+    reference_signal = normalize_signal(event.get("reference_signal"))
+    counter_direction = normalize_signal(event.get("counter_direction"))
+
+    direction_text = (
+        f"{reference_signal[0]}→{counter_direction[0]}"
+        if reference_signal in {"LONG", "SHORT"} and counter_direction in {"LONG", "SHORT"}
+        else f"{reference_signal}→{counter_direction}"
     )
 
+    ratio_pct = event.get("ratio_pct")
+    full_threshold_pct = event.get("full_threshold_pct")
+    ratio_text = "NA" if ratio_pct is None else f"{float(ratio_pct):.2f}%"
+    full_threshold_text = "NA" if full_threshold_pct is None else f"{float(full_threshold_pct):.2f}%"
+
     opposite = event.get("opposite_conditions") or {}
-    conditions = opposite.get("conditions") or {}
-    condition_lines = [f"- {name}: {'YES' if ok else 'NO'}" for name, ok in conditions.items()]
+    opposite_met = bool(opposite.get("conditions_met"))
+    opposite_text = "conditions met ❗" if opposite_met else "not confirmed"
 
-    if not condition_lines:
-        condition_lines.append("- Opposite conditions: unavailable")
-
-    lines = [
-        f"{pair}",
-        f"1h candle: {_format_candle_time_for_message(event.get('candle_open_time'))}",
-    ]
-
-    if app_link:
-        lines.append(f"Chart: {app_link}")
-
-    lines.extend([
-        "",
-        f"1h Counter Momentum: {signal_badge(event.get('reference_signal'))} → {signal_badge(event.get('counter_direction'))} ⚠️",
-        f"Event: {status_text}",
-        "",
-        f"Reference signal: {signal_badge(event.get('reference_signal'))}",
-        f"Counter direction: {signal_badge(event.get('counter_direction'))}",
-        f"Open price: {format_price(event.get('candle_open'))}",
-        f"Current price: {format_price(event.get('current_price'))}",
-        f"Body size: {format_price(event.get('body_size'))}",
-        f"Opening zone: {format_price(event.get('lower_zone'))} - {format_price(event.get('upper_zone'))}",
-        f"Zone distance: {format_price(event.get('zone_distance'))}",
-        f"Counter body ratio: {float(event.get('ratio_pct')):.2f}%",
-        f"Early warning threshold: {float(event.get('early_threshold_pct')):.2f}%",
-        f"Full momentum threshold: {float(event.get('full_threshold_pct')):.2f}%",
-        "",
-        f"Opposite {opposite.get('opposite_signal', 'NEUTRAL')} conditions on current open 1H candle:",
-        *condition_lines,
-        f"Opposite signal conditions currently met: {'YES' if opposite.get('conditions_met') else 'NO'}",
-        "",
-        "Official 1H signal: not confirmed",
-        "Candle still open",
-        "May disappear before 1H close",
-    ])
-
-    return "\n".join(lines)
-
+    return "\n".join(
+        [
+            f"⚠️ {pair} 1H COUNTER {status_label} {direction_text}",
+            f"Ref: {reference_signal}",
+            f"Counter: {counter_direction}",
+            f"Ratio: {ratio_text} / {full_threshold_text}",
+            f"Price: {format_price(event.get('current_price'))}",
+            f"Opposite signal: {opposite_text}",
+            "Candle still open",
+        ]
+    )
 
 def get_ichimoku_condition_summary(df: pd.DataFrame) -> Dict:
     if df.empty:
