@@ -981,7 +981,7 @@ def _process_closed_candle(
                             new_direction=opposite,
                             candle_time=row["close_time"],
                             price=float(row["close"]),
-                            reason="Counter-momentum + closed opposite signal + RSI4 strong confirmation",
+                            reason="COUNTER_MOMENTUM_PLUS_REVERSE_SIGNAL_RSI_APPROVED",
                             details=[
                                 f"Counter ratio: {counter.get('ratio_pct'):.2f}%",
                                 f"RSI4: {rsi4:.2f}",
@@ -1077,7 +1077,7 @@ def _process_closed_candle(
                     new_direction=opposite,
                     candle_time=row["close_time"],
                     price=float(row["close"]),
-                    reason="Closed opposite signal without counter-momentum; RSI4 filter approved reversal",
+                    reason="NORMAL_REVERSE_SIGNAL_RSI_APPROVED",
                     details=[
                         f"Official signal: {official_signal}",
                         f"RSI4: {'NA' if rsi4 is None else f'{rsi4:.2f}'}",
@@ -1174,18 +1174,41 @@ def run_live_1h_strategy(
 
 def _reason_description(reason: str) -> str:
     descriptions = {
-        "OFFICIAL_SIGNAL_WHILE_FLAT": "No position was open; the closed 1H candle has an official directional signal.",
-        "NORMAL_REVERSE_SIGNAL": "A closed opposite signal appeared without counter-momentum; the old position closed and the opposite position opened.",
-        "NORMAL_REVERSE_SIGNAL_RSI_APPROVED": "A closed opposite signal appeared without counter-momentum, and the RSI4 normal-reversal filter approved the direction change.",
-        "NORMAL_REVERSE_SIGNAL_RSI_REJECTED": "A closed opposite signal appeared without counter-momentum, but the RSI4 normal-reversal filter rejected the direction change.",
-        "COUNTER_MOMENTUM_PLUS_REVERSE_SIGNAL_RSI_APPROVED": "Counter-momentum and a closed opposite signal occurred together; RSI4 strongly confirmed the opposite direction.",
-        "TP_AFTER_TARGET_BUFFER_CLOSE": "TP was hit and the candle closed inside the target-zone buffer; the same direction reopened with the target shifted one zone forward.",
-        "TP_AFTER_SAME_DIRECTION_MOMENTUM": "TP was hit; the candle did not close in the target buffer but had at least 35% same-direction momentum, so the same direction reopened with a shifted target.",
-        "TP_AFTER_RSI4_LONG_TO_SHORT": "After LONG TP, buffer close and same-direction momentum were absent; RSI4 was at least 80.5, so SHORT opened.",
-        "TP_AFTER_RSI4_SHORT_TO_LONG": "After SHORT TP, buffer close and same-direction momentum were absent; RSI4 was at most 20, so LONG opened.",
-        "TP_AFTER_OFFICIAL_SIGNAL": "After TP, buffer close, same-direction momentum and TP-specific RSI4 reversal did not open a position; the current official signal was used.",
+        "OFFICIAL_SIGNAL_WHILE_FLAT": "Resmî sinyal ile açılış",
+        "NORMAL_REVERSE_SIGNAL": "Normal ters sinyal",
+        "NORMAL_REVERSE_SIGNAL_RSI_APPROVED": "Normal ters sinyal + RSI4 onay",
+        "NORMAL_REVERSE_SIGNAL_RSI_REJECTED": "Normal ters sinyal + RSI4 red",
+        "COUNTER_MOMENTUM_PLUS_REVERSE_SIGNAL_RSI_APPROVED": "Counter-momentum + RSI4 onay",
+        "COUNTER_MOMENTUM_PLUS_REVERSE_SIGNAL_RSI_REJECTED": "Counter-momentum + RSI4 red",
+        "TP_AFTER_TARGET_BUFFER_CLOSE": "TP sonrası target buffer",
+        "TP_AFTER_SAME_DIRECTION_MOMENTUM": "TP sonrası aynı yön momentum",
+        "TP_AFTER_RSI4_LONG_TO_SHORT": "LONG TP sonrası RSI4 → SHORT",
+        "TP_AFTER_RSI4_SHORT_TO_LONG": "SHORT TP sonrası RSI4 → LONG",
+        "TP_AFTER_OFFICIAL_SIGNAL": "TP sonrası resmî sinyal",
+        "SMA_ORDER_NOT_VALID": "SMA sıralaması uygun değil",
+        "NO_VALID_SMA": "Geçerli SMA TP yok",
+        "NEAREST_VALID_SMA": "En yakın geçerli SMA TP",
+        "TARGET_RANGE_UNAVAILABLE": "Target aralığı yok",
+        "ZONE_CONTEXT_UNAVAILABLE": "Zone bağlamı yok",
     }
-    return descriptions.get(reason, reason)
+    text = descriptions.get(str(reason or ""))
+    if text:
+        return text
+    return str(reason or "").replace("_", " ").title()
+
+
+def _compact_details(details: List[str], max_lines: int = 3) -> List[str]:
+    cleaned: List[str] = []
+    for item in details or []:
+        text = str(item)
+        if text.startswith("Closed trade:"):
+            continue
+        if text.startswith("Filter:"):
+            text = text.replace("LONG→SHORT requires", "L→S şartı:").replace("SHORT→LONG requires", "S→L şartı:")
+        if text.startswith("Official signal:"):
+            text = text.replace("Official signal:", "Sinyal:")
+        cleaned.append(text)
+    return cleaned[:max_lines]
 
 
 def build_position_open_message(
@@ -1201,14 +1224,12 @@ def build_position_open_message(
 ) -> str:
     return "\n".join(
         [
-            pair,
-            f"1h position: {direction} OPENED",
-            f"Time: {_iso(entry_time)}",
+            f"🟢 {pair} 1H OPEN {direction}",
             f"Entry: {format_price(entry_price)}",
-            f"Event reason: {_reason_description(reason)}",
-            f"Active zone: {format_price(active_lower)} - {format_price(active_upper)}",
-            f"Target zone: {format_price(target_zone)}",
-            "TP will be selected dynamically at the next/current 1H candle open.",
+            f"Reason: {_reason_description(reason)}",
+            f"Zone: {format_price(active_lower)} → {format_price(active_upper)}",
+            f"Target: {format_price(target_zone)}",
+            f"Time: {_iso(entry_time)}",
         ]
     )
 
@@ -1223,14 +1244,15 @@ def build_position_change_message(
     reason: str,
     details: List[str],
 ) -> str:
+    short_old = str(old_direction or "?")[:1]
+    short_new = str(new_direction or "?")[:1]
     return "\n".join(
         [
-            pair,
-            f"1h position changed: {old_direction} → {new_direction}",
-            f"Candle: {_iso(candle_time)}",
-            f"Exit / new entry price: {format_price(price)}",
-            f"Event reason: {reason}",
-            *details,
+            f"🟠 {pair} 1H SWITCH {short_old}→{short_new}",
+            f"Price: {format_price(price)}",
+            f"Reason: {_reason_description(reason)}",
+            *_compact_details(details, max_lines=3),
+            f"Time: {_iso(candle_time)}",
         ]
     )
 
@@ -1249,15 +1271,13 @@ def build_position_held_message(
     rsi_text = "NA" if rsi4 is None else f"{rsi4:.2f}"
     return "\n".join(
         [
-            pair,
-            f"1h position kept: {direction}",
-            f"Candle: {_iso(candle_time)}",
+            f"🟣 {pair} 1H HELD {direction}",
             f"Close: {format_price(price)}",
-            "Event: Counter-momentum + closed opposite signal occurred",
-            f"Opposite official signal: {opposite_signal}",
-            f"Counter ratio: {ratio_text}",
+            "Reason: Counter-momentum + RSI4 red",
+            f"Opposite: {opposite_signal}",
+            f"Counter: {ratio_text}",
             f"RSI4: {rsi_text}",
-            "Decision: RSI4 strong-confirmation filter was NOT met, so the existing position remains open.",
+            f"Time: {_iso(candle_time)}",
         ]
     )
 
@@ -1279,16 +1299,11 @@ def build_tp_update_message(
 ) -> str:
     return "\n".join(
         [
-            pair,
-            f"1h {direction} TP updated",
-            f"Candle open: {_iso(candle_time)}",
-            f"Previous TP: {previous_source or 'NONE'} {format_price(previous_trigger)}",
-            f"New TP source: {source}",
-            f"Raw source value: {format_price(raw_value)}",
-            f"Wick trigger: {format_price(trigger)}",
-            f"Active zone: {format_price(active_lower)} - {format_price(active_upper)}",
-            f"Target zone: {format_price(target_zone)}",
-            f"Selection reason: {reason}",
+            f"🟡 {pair} 1H TP SET {direction}",
+            f"TP: {source} @ {format_price(trigger)}",
+            f"Target: {format_price(target_zone)}",
+            f"Reason: {_reason_description(reason)}",
+            f"Time: {_iso(candle_time)}",
         ]
     )
 
@@ -1307,16 +1322,11 @@ def build_tp_hit_message(
 ) -> str:
     return "\n".join(
         [
-            pair,
-            f"1h {direction} TP HIT",
-            f"Trade: {trade_id}",
-            f"Candle: {_iso(candle_time)}",
-            f"TP source: {source}",
-            f"Source value: {format_price(raw_value)}",
-            f"Wick trigger: {format_price(trigger)}",
-            f"Recorded exit: {format_price(exit_price)}",
-            f"Target zone: {format_price(target_zone)}",
-            "Position closed. New position decision will be made after this 1H candle closes.",
+            f"⭐ {pair} 1H TP HIT {direction}",
+            f"Exit: {format_price(exit_price)}",
+            f"TP: {source} @ {format_price(trigger)}",
+            f"Target: {format_price(target_zone)}",
+            f"Time: {_iso(candle_time)}",
         ]
     )
 
@@ -1331,12 +1341,11 @@ def build_wait_message(
 ) -> str:
     return "\n".join(
         [
-            pair,
-            "1h position state: WAIT",
-            f"Candle: {_iso(candle_time)}",
+            f"⚪ {pair} 1H WAIT",
             f"Reason: {reason}",
             f"RSI4: {'NA' if rsi4 is None else f'{rsi4:.2f}'}",
-            f"Official signal: {official_signal}",
+            f"Signal: {official_signal}",
+            f"Time: {_iso(candle_time)}",
         ]
     )
 
@@ -1344,11 +1353,10 @@ def build_wait_message(
 def build_zone_unavailable_message(pair: str, direction: str, price: float, action: str) -> str:
     return "\n".join(
         [
-            pair,
-            "1h ZONE CONTEXT UNAVAILABLE",
+            f"⚠️ {pair} 1H ZONE ERROR",
             f"Direction: {direction}",
             f"Price: {format_price(price)}",
             f"Action: {action}",
-            "Manual/Fibonacci zone update is required.",
+            "Zone update required.",
         ]
     )
