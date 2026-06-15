@@ -2560,6 +2560,36 @@ def add_live_strategy_trade_segments(
 
     return fig
 
+
+
+def _shared_display_x_range(plot_df: pd.DataFrame):
+    """Return a stable x-axis range so stacked price/RSI charts align pixel-by-pixel."""
+    if plot_df is None or plot_df.empty or "display_time" not in plot_df.columns:
+        return None
+
+    times = pd.to_datetime(plot_df["display_time"], errors="coerce")
+    times = times.dropna().sort_values()
+    if times.empty:
+        return None
+
+    start = times.iloc[0]
+    last = times.iloc[-1]
+
+    if len(times) > 1:
+        diffs = times.diff().dropna()
+        step = diffs.median() if not diffs.empty else pd.Timedelta(hours=1)
+        if pd.isna(step) or step <= pd.Timedelta(0):
+            step = pd.Timedelta(hours=1)
+    else:
+        step = pd.Timedelta(hours=1)
+
+    return [start, last + step]
+
+
+def _shared_chart_margin() -> dict:
+    # Keep the plot area width equal between the price chart and the RSI chart.
+    return dict(l=70, r=70, t=20, b=40)
+
 def make_price_ema_chart(
     df: pd.DataFrame,
     title: str,
@@ -2694,10 +2724,12 @@ def make_price_ema_chart(
         show_markers=show_live_strategy,
     )
 
+    shared_x_range = _shared_display_x_range(plot_df)
     fig.update_layout(
         title="",
         xaxis_title="Time",
         yaxis_title="Price",
+        xaxis=dict(range=shared_x_range) if shared_x_range is not None else None,
         xaxis_rangeslider_visible=False,
         height=520,
         hovermode="closest",
@@ -2708,6 +2740,7 @@ def make_price_ema_chart(
         legend_y=1.02,
         legend_xanchor="left",
         legend_x=0,
+        margin=_shared_chart_margin(),
     )
     return fig
 
@@ -3076,10 +3109,12 @@ def make_1h_rsi_chart(
         show_markers=show_live_strategy,
     )
 
+    shared_x_range = _shared_display_x_range(plot_df)
     fig.update_layout(
         title="",
         xaxis_title="Time",
         yaxis_title="RSI",
+        xaxis=dict(range=shared_x_range) if shared_x_range is not None else None,
         yaxis=dict(
             range=[0, 100],
             tickmode="array",
@@ -3087,12 +3122,14 @@ def make_1h_rsi_chart(
         ),
         height=280,
         hovermode="closest",
+        hoverdistance=90,
+        spikedistance=90,
         legend_orientation="h",
         legend_yanchor="bottom",
         legend_y=1.02,
         legend_xanchor="left",
         legend_x=0,
-        margin=dict(l=40, r=20, t=20, b=40),
+        margin=_shared_chart_margin(),
     )
 
     return fig
