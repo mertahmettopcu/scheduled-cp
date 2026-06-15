@@ -1023,6 +1023,66 @@ def _details_text(value) -> str:
     return str(value)
 
 
+def _details_dict(value) -> dict:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return {}
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return {}
+        try:
+            parsed = json.loads(text)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+
+def _details_value(value, key: str):
+    data = _details_dict(value)
+    return data.get(key)
+
+
+def _short_reason_label(reason: str) -> str:
+    reason = str(reason or "")
+    labels = {
+        "OFFICIAL_SIGNAL_WHILE_FLAT": "Resmî sinyal ile açılış",
+        "NORMAL_REVERSE_SIGNAL": "Normal ters sinyal",
+        "NORMAL_REVERSE_SIGNAL_RSI_APPROVED": "Normal ters sinyal + RSI4 onay",
+        "NORMAL_REVERSE_SIGNAL_RSI_REJECTED": "Normal ters sinyal + RSI4 red",
+        "COUNTER_MOMENTUM_PLUS_REVERSE_SIGNAL_RSI_APPROVED": "Counter-momentum + RSI4 onay",
+        "COUNTER_MOMENTUM_PLUS_REVERSE_SIGNAL_RSI_REJECTED": "Counter-momentum + RSI4 red",
+        "TP_AFTER_TARGET_BUFFER_CLOSE": "TP sonrası target buffer",
+        "TP_AFTER_SAME_DIRECTION_MOMENTUM": "TP sonrası aynı yön momentum",
+        "TP_AFTER_RSI4_LONG_TO_SHORT": "LONG TP sonrası RSI4 → SHORT",
+        "TP_AFTER_RSI4_SHORT_TO_LONG": "SHORT TP sonrası RSI4 → LONG",
+        "TP_AFTER_OFFICIAL_SIGNAL": "TP sonrası resmî sinyal",
+        "TP_ZONE": "Zone TP",
+        "TP_SMA65": "SMA65 TP",
+        "TP_SMA120": "SMA120 TP",
+        "TP_SMA168": "SMA168 TP",
+        "SMA_ORDER_NOT_VALID": "SMA sıralaması uygun değil",
+        "NO_VALID_SMA": "Geçerli SMA TP yok",
+        "NEAREST_VALID_SMA": "En yakın geçerli SMA TP",
+        "TARGET_RANGE_UNAVAILABLE": "Target aralığı yok",
+        "ZONE_CONTEXT_UNAVAILABLE": "Zone bağlamı yok",
+        "POSITION_KEPT_WITHOUT_TP": "Pozisyon TP olmadan korundu",
+        "NEW_POSITION_BLOCKED": "Yeni pozisyon engellendi",
+    }
+    return labels.get(reason, reason.replace("_", " ").title() if reason else "")
+
+
+def _fmt_optional(value, decimals: int = 2) -> str:
+    try:
+        if value is None or pd.isna(value):
+            return "NA"
+        return f"{float(value):.{decimals}f}"
+    except Exception:
+        return "NA"
+
+
 # =========================================================
 # Indicator helpers
 # =========================================================
@@ -1823,7 +1883,11 @@ def _prepare_live_event_times(events: pd.DataFrame | None) -> pd.DataFrame:
     out["event_type"] = out.get("event_type", pd.Series(index=out.index, dtype="object")).fillna("").astype(str)
     out["direction"] = out.get("direction", pd.Series(index=out.index, dtype="object")).fillna("").astype(str).str.upper()
     out["reason_text"] = out.get("reason", pd.Series(index=out.index, dtype="object")).fillna("").astype(str)
-    out["details_text"] = out.get("details", pd.Series(index=out.index, dtype="object")).apply(_details_text)
+    out["reason_label"] = out["reason_text"].apply(_short_reason_label)
+    details_series = out.get("details", pd.Series(index=out.index, dtype="object"))
+    out["details_text"] = details_series.apply(_details_text)
+    out["rsi4_detail"] = pd.to_numeric(details_series.apply(lambda value: _details_value(value, "rsi4")), errors="coerce")
+    out["rsi4_detail_text"] = out["rsi4_detail"].apply(_fmt_optional)
     out["price"] = pd.to_numeric(out.get("price"), errors="coerce")
 
     return out.sort_values(["event_time", "created_at" if "created_at" in out.columns else "event_time"]).copy()
@@ -1883,6 +1947,8 @@ def _build_position_change_events(event_work: pd.DataFrame) -> tuple[pd.DataFram
                 "new_direction": new_direction,
                 "label": label,
                 "reason_text": str(open_row.get("reason_text") or close_row.get("reason_text") or ""),
+                "reason_label": str(open_row.get("reason_label") or close_row.get("reason_label") or ""),
+                "rsi4_detail_text": str(close_row.get("rsi4_detail_text") or open_row.get("rsi4_detail_text") or "NA"),
                 "close_trade_id": close_row.get("trade_id"),
                 "open_trade_id": open_row.get("trade_id"),
                 "close_details_text": close_row.get("details_text") or "",
@@ -1998,20 +2064,16 @@ def add_live_strategy_event_markers(
                     "old_direction",
                     "new_direction",
                     "price",
-                    "reason_text",
-                    "close_trade_id",
-                    "open_trade_id",
-                    "close_details_text",
+                    "reason_label",
+                    "rsi4_detail_text",
                 ]],
                 hovertemplate=(
-                    "Canlı pozisyon değişimi<br>"
+                    "🟠 Pozisyon değişti<br>"
                     "%{customdata[0]} → %{customdata[1]}<br>"
-                    "Çıkış / yeni giriş: %{customdata[2]:.2f}<br>"
+                    "Fiyat: %{customdata[2]:.2f}<br>"
                     "Sebep: %{customdata[3]}<br>"
-                    "Kapanan trade: %{customdata[4]}<br>"
-                    "Yeni trade: %{customdata[5]}<br>"
-                    "Detay: %{customdata[6]}<br>"
-                    "Time: %{x}<extra></extra>"
+                    "RSI4: %{customdata[4]}<br>"
+                    "%{x}<extra></extra>"
                 ),
             )
         )
@@ -2038,15 +2100,14 @@ def add_live_strategy_event_markers(
                     marker=dict(symbol=symbol, size=15, color=color, line=dict(width=1, color="white")),
                     name=name,
                     showlegend=False,
-                    customdata=subset[["direction", "price", "reason_text", "target_zone", "details_text"]],
+                    customdata=subset[["direction", "price", "reason_label", "target_zone"]],
                     hovertemplate=(
-                        f"{name}<br>"
-                        "Direction: %{customdata[0]}<br>"
+                        "🟢 Pozisyon açıldı<br>"
+                        "Yön: %{customdata[0]}<br>"
                         "Entry: %{customdata[1]:.2f}<br>"
-                        "Reason: %{customdata[2]}<br>"
-                        "Target zone: %{customdata[3]:.2f}<br>"
-                        "Details: %{customdata[4]}<br>"
-                        "Time: %{x}<extra></extra>"
+                        "Sebep: %{customdata[2]}<br>"
+                        "Target: %{customdata[3]:.2f}<br>"
+                        "%{x}<extra></extra>"
                     ),
                 )
             )
@@ -2061,17 +2122,14 @@ def add_live_strategy_event_markers(
                 marker=dict(symbol="star", size=14, color="#D4A000", line=dict(width=1, color="black")),
                 name="Live TP hit",
                 showlegend=False,
-                customdata=tp_hits[["direction", "price", "reason_text", "tp_source", "tp_raw_value", "tp_trigger", "details_text"]],
+                customdata=tp_hits[["direction", "price", "reason_label", "tp_source", "tp_trigger", "target_zone"]],
                 hovertemplate=(
-                    "Live TP hit<br>"
-                    "Closed direction: %{customdata[0]}<br>"
-                    "Exit price: %{customdata[1]:.2f}<br>"
-                    "Reason: %{customdata[2]}<br>"
-                    "TP source: %{customdata[3]}<br>"
-                    "TP raw value: %{customdata[4]:.2f}<br>"
-                    "TP trigger: %{customdata[5]:.2f}<br>"
-                    "Details: %{customdata[6]}<br>"
-                    "Time: %{x}<extra></extra>"
+                    "⭐ TP oldu<br>"
+                    "Yön: %{customdata[0]}<br>"
+                    "Exit: %{customdata[1]:.2f}<br>"
+                    "TP: %{customdata[3]} @ %{customdata[4]:.2f}<br>"
+                    "Target: %{customdata[5]:.2f}<br>"
+                    "%{x}<extra></extra>"
                 ),
             )
         )
@@ -2090,14 +2148,13 @@ def add_live_strategy_event_markers(
                 marker=dict(symbol="circle-x", size=13, color="#4D4D4D", line=dict(width=1.5, color="white")),
                 name="Live position close",
                 showlegend=False,
-                customdata=closes[["direction", "price", "reason_text", "details_text"]],
+                customdata=closes[["direction", "price", "reason_label"]],
                 hovertemplate=(
-                    "Canlı pozisyon kapandı<br>"
-                    "Kapanan yön: %{customdata[0]}<br>"
-                    "Çıkış fiyatı: %{customdata[1]:.2f}<br>"
+                    "⚫ Pozisyon kapandı<br>"
+                    "Yön: %{customdata[0]}<br>"
+                    "Exit: %{customdata[1]:.2f}<br>"
                     "Sebep: %{customdata[2]}<br>"
-                    "Details: %{customdata[3]}<br>"
-                    "Time: %{x}<extra></extra>"
+                    "%{x}<extra></extra>"
                 ),
             )
         )
@@ -2112,14 +2169,14 @@ def add_live_strategy_event_markers(
                 marker=dict(symbol="diamond-open", size=12, color="#9467BD", line=dict(width=2)),
                 name="Position held",
                 showlegend=False,
-                customdata=held[["direction", "price", "reason_text", "details_text"]],
+                customdata=held[["direction", "price", "reason_label", "rsi4_detail_text"]],
                 hovertemplate=(
-                    "Position kept open<br>"
-                    "Direction: %{customdata[0]}<br>"
-                    "Price: %{customdata[1]:.2f}<br>"
-                    "Reason: %{customdata[2]}<br>"
-                    "Details: %{customdata[3]}<br>"
-                    "Time: %{x}<extra></extra>"
+                    "🟣 Pozisyon korundu<br>"
+                    "Yön: %{customdata[0]}<br>"
+                    "Fiyat: %{customdata[1]:.2f}<br>"
+                    "Sebep: %{customdata[2]}<br>"
+                    "RSI4: %{customdata[3]}<br>"
+                    "%{x}<extra></extra>"
                 ),
             )
         )
@@ -2215,14 +2272,11 @@ def add_live_strategy_tp_segments(
                         row.get("active_upper_zone"),
                     ]] * 2,
                     hovertemplate=(
-                        "Live strategy TP<br>"
-                        "Direction: %{customdata[0]}<br>"
-                        "Source: %{customdata[1]}<br>"
-                        "Raw value: %{customdata[2]:.2f}<br>"
-                        "Trigger: %{customdata[3]:.2f}<br>"
-                        "Target zone: %{customdata[4]:.2f}<br>"
-                        "Active zone: %{customdata[5]:.2f} – %{customdata[6]:.2f}<br>"
-                        "Time: %{x}<extra></extra>"
+                        "🟡 TP çizgisi<br>"
+                        "Yön: %{customdata[0]}<br>"
+                        "TP: %{customdata[1]} @ %{customdata[3]:.2f}<br>"
+                        "Target: %{customdata[4]:.2f}<br>"
+                        "%{x}<extra></extra>"
                     ),
                 )
             )
@@ -2303,13 +2357,11 @@ def add_live_strategy_trade_segments(
                     status,
                 ]] * 2,
                 hovertemplate=(
-                    "Live trade path<br>"
-                    "Direction: %{customdata[0]}<br>"
-                    "Entry reason: %{customdata[1]}<br>"
+                    "Trade path<br>"
+                    "%{customdata[0]} | %{customdata[4]}<br>"
                     "Entry: %{customdata[2]:.2f}<br>"
-                    "Current/exit: %{customdata[3]:.2f}<br>"
-                    "Status: %{customdata[4]}<br>"
-                    "Time: %{x}<extra></extra>"
+                    "Exit/current: %{customdata[3]:.2f}<br>"
+                    "%{x}<extra></extra>"
                 ),
             )
         )
@@ -2488,7 +2540,7 @@ def make_price_ema_chart(
         yaxis_title="Price",
         xaxis_rangeslider_visible=False,
         height=520,
-        hovermode="x unified",
+        hovermode="closest",
         legend_orientation="h",
         legend_yanchor="bottom",
         legend_y=1.02,
@@ -2660,21 +2712,18 @@ def add_live_strategy_rsi_event_markers(
                     customdata=rsi_changes[[
                         "old_direction",
                         "new_direction",
-                        "price",
-                        "reason_text",
+                        "reason_label",
                         "rsi4",
                         "rsi14",
                         "rsi52",
                     ]],
                     hovertemplate=(
-                        "Canlı pozisyon değişimi<br>"
+                        "🟠 Pozisyon değişti<br>"
                         "%{customdata[0]} → %{customdata[1]}<br>"
-                        "Çıkış / yeni giriş: %{customdata[2]:.2f}<br>"
-                        "Sebep: %{customdata[3]}<br>"
-                        "RSI4: %{customdata[4]:.2f}<br>"
-                        "RSI14: %{customdata[5]:.2f}<br>"
-                        "RSI52: %{customdata[6]:.2f}<br>"
-                        "Time: %{x}<extra></extra>"
+                        "Sebep: %{customdata[2]}<br>"
+                        "RSI4: %{customdata[3]:.2f}<br>"
+                        "RSI14/52: %{customdata[4]:.2f} / %{customdata[5]:.2f}<br>"
+                        "%{x}<extra></extra>"
                     ),
                 )
             )
@@ -2699,16 +2748,14 @@ def add_live_strategy_rsi_event_markers(
                     marker=dict(symbol=symbol, size=13, color=color, line=dict(width=1, color="white")),
                     name=name,
                     showlegend=False,
-                    customdata=subset[["direction", "price", "reason_text", "rsi4", "rsi14", "rsi52"]],
+                    customdata=subset[["direction", "reason_label", "rsi4", "rsi14", "rsi52"]],
                     hovertemplate=(
-                        f"{name}<br>"
-                        "Direction: %{customdata[0]}<br>"
-                        "Price: %{customdata[1]:.2f}<br>"
-                        "Reason: %{customdata[2]}<br>"
-                        "RSI4: %{customdata[3]:.2f}<br>"
-                        "RSI14: %{customdata[4]:.2f}<br>"
-                        "RSI52: %{customdata[5]:.2f}<br>"
-                        "Time: %{x}<extra></extra>"
+                        "🟢 Pozisyon açıldı<br>"
+                        "Yön: %{customdata[0]}<br>"
+                        "Sebep: %{customdata[1]}<br>"
+                        "RSI4: %{customdata[2]:.2f}<br>"
+                        "RSI14/52: %{customdata[3]:.2f} / %{customdata[4]:.2f}<br>"
+                        "%{x}<extra></extra>"
                     ),
                 )
             )
@@ -2723,18 +2770,14 @@ def add_live_strategy_rsi_event_markers(
                 marker=dict(symbol="star", size=13, color="#D4A000", line=dict(width=1, color="black")),
                 name="Live TP hit RSI",
                 showlegend=False,
-                customdata=tp_hits[["direction", "price", "reason_text", "tp_source", "tp_trigger", "rsi4", "rsi14", "rsi52"]],
+                customdata=tp_hits[["direction", "tp_source", "tp_trigger", "rsi4", "rsi14", "rsi52"]],
                 hovertemplate=(
-                    "Live TP hit<br>"
-                    "Closed direction: %{customdata[0]}<br>"
-                    "Exit price: %{customdata[1]:.2f}<br>"
-                    "Reason: %{customdata[2]}<br>"
-                    "TP source: %{customdata[3]}<br>"
-                    "TP trigger: %{customdata[4]:.2f}<br>"
-                    "RSI4: %{customdata[5]:.2f}<br>"
-                    "RSI14: %{customdata[6]:.2f}<br>"
-                    "RSI52: %{customdata[7]:.2f}<br>"
-                    "Time: %{x}<extra></extra>"
+                    "⭐ TP oldu<br>"
+                    "Yön: %{customdata[0]}<br>"
+                    "TP: %{customdata[1]} @ %{customdata[2]:.2f}<br>"
+                    "RSI4: %{customdata[3]:.2f}<br>"
+                    "RSI14/52: %{customdata[4]:.2f} / %{customdata[5]:.2f}<br>"
+                    "%{x}<extra></extra>"
                 ),
             )
         )
@@ -2749,16 +2792,14 @@ def add_live_strategy_rsi_event_markers(
                 marker=dict(symbol="circle-x", size=12, color="#4D4D4D", line=dict(width=1.5, color="white")),
                 name="Live position close RSI",
                 showlegend=False,
-                customdata=closes[["direction", "price", "reason_text", "rsi4", "rsi14", "rsi52"]],
+                customdata=closes[["direction", "reason_label", "rsi4", "rsi14", "rsi52"]],
                 hovertemplate=(
-                    "Canlı pozisyon kapandı<br>"
-                    "Kapanan yön: %{customdata[0]}<br>"
-                    "Çıkış fiyatı: %{customdata[1]:.2f}<br>"
-                    "Sebep: %{customdata[2]}<br>"
-                    "RSI4: %{customdata[3]:.2f}<br>"
-                    "RSI14: %{customdata[4]:.2f}<br>"
-                    "RSI52: %{customdata[5]:.2f}<br>"
-                    "Time: %{x}<extra></extra>"
+                    "⚫ Pozisyon kapandı<br>"
+                    "Yön: %{customdata[0]}<br>"
+                    "Sebep: %{customdata[1]}<br>"
+                    "RSI4: %{customdata[2]:.2f}<br>"
+                    "RSI14/52: %{customdata[3]:.2f} / %{customdata[4]:.2f}<br>"
+                    "%{x}<extra></extra>"
                 ),
             )
         )
@@ -2773,16 +2814,14 @@ def add_live_strategy_rsi_event_markers(
                 marker=dict(symbol="diamond-open", size=12, color="#9467BD", line=dict(width=2)),
                 name="Position held RSI",
                 showlegend=False,
-                customdata=held[["direction", "price", "reason_text", "rsi4", "rsi14", "rsi52"]],
+                customdata=held[["direction", "reason_label", "rsi4", "rsi14", "rsi52"]],
                 hovertemplate=(
-                    "Position kept open<br>"
-                    "Direction: %{customdata[0]}<br>"
-                    "Price: %{customdata[1]:.2f}<br>"
-                    "Reason: %{customdata[2]}<br>"
-                    "RSI4: %{customdata[3]:.2f}<br>"
-                    "RSI14: %{customdata[4]:.2f}<br>"
-                    "RSI52: %{customdata[5]:.2f}<br>"
-                    "Time: %{x}<extra></extra>"
+                    "🟣 Pozisyon korundu<br>"
+                    "Yön: %{customdata[0]}<br>"
+                    "Sebep: %{customdata[1]}<br>"
+                    "RSI4: %{customdata[2]:.2f}<br>"
+                    "RSI14/52: %{customdata[3]:.2f} / %{customdata[4]:.2f}<br>"
+                    "%{x}<extra></extra>"
                 ),
             )
         )
@@ -2885,7 +2924,7 @@ def make_1h_rsi_chart(
             tickvals=[20, 30, 50, 70, 80.5],
         ),
         height=280,
-        hovermode="x unified",
+        hovermode="closest",
         legend_orientation="h",
         legend_yanchor="bottom",
         legend_y=1.02,
