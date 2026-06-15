@@ -43,6 +43,68 @@ h2 {
 [data-testid="stExpander"] {
     margin-bottom: 0.4rem;
 }
+
+.legend-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 0.55rem 0.9rem;
+    margin-top: 0.4rem;
+}
+
+.legend-item {
+    display: flex;
+    align-items: center;
+    gap: 0.65rem;
+    border: 1px solid rgba(120, 120, 120, 0.22);
+    border-radius: 0.55rem;
+    padding: 0.45rem 0.55rem;
+    background: rgba(120, 120, 120, 0.045);
+}
+
+.legend-symbol {
+    min-width: 44px;
+    text-align: center;
+    font-size: 1.15rem;
+    font-weight: 700;
+}
+
+.legend-text {
+    line-height: 1.2;
+    font-size: 0.92rem;
+}
+
+.legend-muted {
+    opacity: 0.72;
+    font-size: 0.82rem;
+}
+
+.legend-line {
+    display: inline-block;
+    width: 42px;
+    height: 0;
+    vertical-align: middle;
+}
+
+.legend-line-yellow {
+    border-top: 4px solid #f1c40f;
+}
+
+.legend-line-zone {
+    border-top: 3px dashed #111111;
+}
+
+.legend-line-path {
+    border-top: 3px dotted #7f8c8d;
+}
+
+.legend-band {
+    display: inline-block;
+    width: 42px;
+    height: 14px;
+    border-top: 2px solid #999999;
+    border-bottom: 2px solid #999999;
+    background: rgba(160, 160, 160, 0.22);
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -3291,31 +3353,48 @@ with st.expander("Grafik ayarları", expanded=False):
             help="Ichimoku TP hesabında SL mesafesinin kaç katının hedef alınacağını belirler. Örn. 2.0 = 2R.",
         )
 
+    show_15m_detail = st.selectbox(
+        "15M detay grafiği",
+        ["Kapalı", "Açık"],
+        index=0,
+        key="show_15m_detail_select_v1",
+        help="Kapalıyken 15M grafiği çizilmez. Böylece dashboard ilk açılışta daha hafif kalır.",
+    ) == "Açık"
+
 with st.expander("Gösterge açıklamaları", expanded=False):
     st.markdown(
         f"""
-- **EMA/SMA çizgileri:** Seçili hareketli ortalama çizgileri. Plotly legend'da sadece bunlar gösterilir.
-- **Zone çizgisi:** Siyah kesikli yatay çizgi.
-- **Zone buffer:** Zone çizgisinin altındaki/üstündeki hafif gri yatay bant.
-- **Normal momentum:** Gri/yeşilimsi dikey gölge.
-- **Counter momentum:** Kırmızı/pembe dikey gölge.
-- **Momentum hesabı:** `abs(close - open)`, mumun **open** fiyatının bulunduğu iki manual zone arasındaki mesafeye göre ölçülür. Buffer hesaba dahil edilmez.
-- **Resmî LONG/SHORT sinyali:** Eski yeşil/kırmızı üçgenler piyasa sinyal state değişimini gösterir.
-- **Canlı pozisyon girişi:** Beyaz kenarlı büyük yeşil/kırmızı üçgen.
-- **Canlı TP çizgisi:** Sarı basamaklı çizgi; Zone/SMA kaynağı hover içinde görünür.
-- **TP gerçekleşmesi:** Sarı yıldız.
-- **Pozisyon kapanışı:** Gri X.
-- **Counter-momentum + ters sinyal geldiği halde RSI4 onayı olmadığı için korunan pozisyon:** Mor boş elmas.
-- **15M sinyal referansı:** 15M'in kendi sinyali değildir; 1H sinyalinin 15M içi referans noktasıdır.
-- **15M canlı 1H pozisyon ve TP:** Canlı strateji yine 1H kararıdır; 15M grafikte yalnızca aynı event/TP çizgileri daha yakın zaman kırılımında gösterilir.
-- **1D Ichimoku TP/SL:** Sinyal mumunun kapanışı entry referansıdır. LONG için SL bulut alt sınırı, SHORT için SL bulut üst sınırıdır. TP = entry referansı ± {ichimoku_rr_multiplier:g} × SL mesafesi.
-- **1D Ichimoku TP çizgisi:** Sarı düz yatay çizgi. Sinyal marker mumunda görünür ama TP çizgisi yalnızca bir sonraki günlük mum aynı Ichimoku sinyal state'iyle kapanırsa çizilir. Çizgi sinyal mumundan başlar; TP'ye temas edilirse orada, TP'den önce zıt Ichimoku sinyali gelirse zıt sinyalde biter.
-        """
-    )
+<div class="legend-grid">
+  <div class="legend-item"><span class="legend-symbol" style="color:#2ecc71;">▲</span><div class="legend-text"><b>LONG pozisyon açıldı</b><br><span class="legend-muted">Canlı 1H strateji LONG giriş markerı.</span></div></div>
+  <div class="legend-item"><span class="legend-symbol" style="color:#e74c3c;">▼</span><div class="legend-text"><b>SHORT pozisyon açıldı</b><br><span class="legend-muted">Canlı 1H strateji SHORT giriş markerı.</span></div></div>
+  <div class="legend-item"><span class="legend-symbol" style="color:#f39c12;">◆</span><div class="legend-text"><b>Pozisyon değişti</b><br><span class="legend-muted">Aynı anda kapanış + ters yönde yeni giriş.</span></div></div>
+  <div class="legend-item"><span class="legend-symbol" style="color:#f1c40f;">★</span><div class="legend-text"><b>TP gerçekleşti</b><br><span class="legend-muted">Zone/SMA TP temas etti ve pozisyon kapandı.</span></div></div>
+  <div class="legend-item"><span class="legend-symbol" style="color:#8e44ad;">◇</span><div class="legend-text"><b>Pozisyon korundu</b><br><span class="legend-muted">Counter-momentum + ters sinyal RSI4 onayı alamadı.</span></div></div>
+  <div class="legend-item"><span class="legend-symbol" style="color:#555555;">⊗</span><div class="legend-text"><b>Pozisyon kapandı</b><br><span class="legend-muted">Tekil kapanış; aynı anda yeni pozisyon açılmadı.</span></div></div>
 
+  <div class="legend-item"><span class="legend-symbol"><span class="legend-line legend-line-yellow"></span></span><div class="legend-text"><b>Canlı TP çizgisi</b><br><span class="legend-muted">Sarı basamaklı çizgi; Zone/SMA kaynağı hover içinde görünür.</span></div></div>
+  <div class="legend-item"><span class="legend-symbol"><span class="legend-line legend-line-path"></span></span><div class="legend-text"><b>Live trade path</b><br><span class="legend-muted">Pozisyonun entry → güncel/exit fiyat yolu.</span></div></div>
+  <div class="legend-item"><span class="legend-symbol"><span class="legend-line legend-line-zone"></span></span><div class="legend-text"><b>Zone çizgisi</b><br><span class="legend-muted">Manual zone seviyesi.</span></div></div>
+  <div class="legend-item"><span class="legend-symbol"><span class="legend-band"></span></span><div class="legend-text"><b>Zone buffer</b><br><span class="legend-muted">Zone çevresindeki fiyat tampon bölgesi.</span></div></div>
+
+  <div class="legend-item"><span class="legend-symbol" style="color:#95a5a6;">▌</span><div class="legend-text"><b>Normal momentum</b><br><span class="legend-muted">Mum gövdesi zone mesafesine göre momentum eşiğini geçti.</span></div></div>
+  <div class="legend-item"><span class="legend-symbol" style="color:#e74c3c;">▌</span><div class="legend-text"><b>Counter momentum</b><br><span class="legend-muted">Açık pozisyona ters yönde güçlü mum.</span></div></div>
+  <div class="legend-item"><span class="legend-symbol" style="color:#27ae60;">△</span><div class="legend-text"><b>Resmî LONG sinyal referansı</b><br><span class="legend-muted">Ham 1H SMA/RSI state değişimi; canlı işlem olmak zorunda değil.</span></div></div>
+  <div class="legend-item"><span class="legend-symbol" style="color:#c0392b;">▽</span><div class="legend-text"><b>Resmî SHORT sinyal referansı</b><br><span class="legend-muted">15M grafikte de 1H sinyalinin intrabar referansı olarak gösterilir.</span></div></div>
+</div>
+
+<p class="legend-muted" style="margin-top:0.8rem;">
+<b>15M notu:</b> 15M grafikte görünen canlı pozisyon/TP markerları yine 1H strateji kararlarıdır; sadece daha detaylı fiyat kırılımında gösterilir.
+</p>
+<p class="legend-muted">
+<b>1D Ichimoku:</b> TP/SL hesaplarında sinyal mumunun kapanışı entry referansıdır. TP çizgisi, bir sonraki günlük mum aynı Ichimoku sinyal state'iyle kapanırsa çizilir. RR multiplier: {ichimoku_rr_multiplier:g}R.
+</p>
+        """,
+        unsafe_allow_html=True,
+    )
 snapshots = load_signal_snapshots(selected_pair)
 hourly = load_candles(selected_pair, "1h")
-m15 = load_candles(selected_pair, "15m")
+m15 = load_candles(selected_pair, "15m") if show_15m_detail else pd.DataFrame()
 daily = load_candles(selected_pair, "1d")
 manual_zones = load_manual_zones(selected_pair)
 counter_momentum_states = load_counter_momentum_states(selected_pair)
@@ -3328,7 +3407,7 @@ if manual_zones.empty:
 else:
     st.caption(f"Aktif manual zone sayısı: {len(manual_zones)}")
 
-if hourly.empty or m15.empty or daily.empty:
+if hourly.empty or daily.empty or (show_15m_detail and m15.empty):
     st.warning("Bu coin için gerekli candle verileri Supabase'te yok. Önce pipeline'ı çalıştır.")
     st.stop()
 
@@ -3342,11 +3421,12 @@ if hourly_closed_raw.empty:
 
 hourly = add_ema_rsi(hourly)
 hourly_closed = add_ema_rsi(hourly_closed_raw)
-m15 = add_ema_rsi(m15)
+if show_15m_detail:
+    m15 = add_ema_rsi(m15)
 daily = add_ichimoku(daily)
 
 hourly_chart = hourly.tail(48).copy()
-m15_chart = m15.tail(96).copy()
+m15_chart = m15.tail(96).copy() if show_15m_detail else pd.DataFrame()
 #daily_chart = daily.tail(220).copy()
 
 daily = add_ichimoku_signal_columns(
@@ -3360,14 +3440,18 @@ hourly_signal_markers = hourly_signal_reference_events[
     hourly_signal_reference_events["open_time"].isin(hourly_chart["open_time"])
 ].copy()
 
-m15_intrabar_signal_reference_events = build_15m_intrabar_reference_markers(
-    hourly_df=hourly_closed,
-    m15_df=m15,
-    only_latest=False,
-)
-m15_intrabar_signal_markers = m15_intrabar_signal_reference_events[
-    m15_intrabar_signal_reference_events["open_time"].isin(m15_chart["open_time"])
-].copy()
+if show_15m_detail:
+    m15_intrabar_signal_reference_events = build_15m_intrabar_reference_markers(
+        hourly_df=hourly_closed,
+        m15_df=m15,
+        only_latest=False,
+    )
+    m15_intrabar_signal_markers = m15_intrabar_signal_reference_events[
+        m15_intrabar_signal_reference_events["open_time"].isin(m15_chart["open_time"])
+    ].copy()
+else:
+    m15_intrabar_signal_reference_events = pd.DataFrame()
+    m15_intrabar_signal_markers = pd.DataFrame()
 
 daily_signal_reference_events = all_signal_events(
     daily,
@@ -3569,45 +3653,47 @@ st.plotly_chart(
     config=PLOTLY_CONFIG,
 )
 
-st.subheader(f"{selected_pair} — 15M (son 1 gün)")
+if show_15m_detail:
+    st.subheader(f"{selected_pair} — 15M (son 1 gün)")
 
-col_15m_a, col_15m_b, col_15m_c, col_15m_d = st.columns(4)
+    col_15m_a, col_15m_b, col_15m_c, col_15m_d = st.columns(4)
 
-with col_15m_a:
-    show_zones_15m = st.toggle("15M yakın zone çizgileri", value=True, key="show_zones_15m")
+    with col_15m_a:
+        show_zones_15m = st.toggle("15M yakın zone çizgileri", value=True, key="show_zones_15m")
 
-with col_15m_b:
-    show_signal_markers_15m = st.toggle("15M 1H sinyal referansı", value=False, key="show_signal_markers_15m_v2")
+    with col_15m_b:
+        show_signal_markers_15m = st.toggle("15M 1H sinyal referansı", value=False, key="show_signal_markers_15m_v2")
 
-with col_15m_c:
-    show_momentum_15m = st.toggle("15M momentum mumları", value=True, key="show_momentum_15m")
+    with col_15m_c:
+        show_momentum_15m = st.toggle("15M momentum mumları", value=True, key="show_momentum_15m")
 
-with col_15m_d:
-    show_live_strategy_15m = st.toggle("15M canlı 1H pozisyon ve TP", value=True, key="show_live_strategy_15m")
+    with col_15m_d:
+        show_live_strategy_15m = st.toggle("15M canlı 1H pozisyon ve TP", value=True, key="show_live_strategy_15m")
 
-st.plotly_chart(
-    make_price_ema_chart(
-        m15_chart,
-        f"{selected_pair} 15M — Price + Moving Averages",
-        zones=manual_zones,
-        show_zones=show_zones_15m,
-        zone_buffer=zone_buffer,
-        ma_display=ma_display,
-        signal_markers=m15_intrabar_signal_markers,
-        show_signal_markers=show_signal_markers_15m,
-        signal_marker_name="1H Signal Intrabar Reference",
-        show_momentum=show_momentum_15m,
-        momentum_threshold_pct=momentum_threshold_pct,
-        momentum_reference_events=m15_intrabar_signal_reference_events,
-        live_strategy_state=strategy_1h_state,
-        live_strategy_events=strategy_1h_events,
-        live_strategy_tp_history=strategy_1h_tp_history,
-        show_live_strategy=show_live_strategy_15m,
-    ),
-    use_container_width=True,
-    config=PLOTLY_CONFIG,
-)
-
+    st.plotly_chart(
+        make_price_ema_chart(
+            m15_chart,
+            f"{selected_pair} 15M — Price + Moving Averages",
+            zones=manual_zones,
+            show_zones=show_zones_15m,
+            zone_buffer=zone_buffer,
+            ma_display=ma_display,
+            signal_markers=m15_intrabar_signal_markers,
+            show_signal_markers=show_signal_markers_15m,
+            signal_marker_name="1H Signal Intrabar Reference",
+            show_momentum=show_momentum_15m,
+            momentum_threshold_pct=momentum_threshold_pct,
+            momentum_reference_events=m15_intrabar_signal_reference_events,
+            live_strategy_state=strategy_1h_state,
+            live_strategy_events=strategy_1h_events,
+            live_strategy_tp_history=strategy_1h_tp_history,
+            show_live_strategy=show_live_strategy_15m,
+        ),
+        use_container_width=True,
+        config=PLOTLY_CONFIG,
+    )
+else:
+    st.info("15M detay grafiği kapalı. Grafik ayarlarından '15M detay grafiği' seçeneğini Açık yaparak yükleyebilirsin.")
 st.subheader(f"{selected_pair} — 1D Ichimoku")
 
 col_1d_a, col_1d_b, col_1d_c = st.columns(3)
