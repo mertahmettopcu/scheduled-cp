@@ -1893,6 +1893,47 @@ def _build_position_change_events(event_work: pd.DataFrame) -> tuple[pd.DataFram
     return pd.DataFrame(rows), paired_indices
 
 
+def _attach_price_candle_context(events_df: pd.DataFrame, chart_work: pd.DataFrame) -> pd.DataFrame:
+    """Attach the candle high/low that contains each event_time.
+
+    Live close/open reversal events are timestamped at the candle close
+    (for example 20:59:59.999). For visual clarity we place the marker
+    near the candle wick instead of directly on the close price.
+    """
+    if events_df is None or events_df.empty or chart_work is None or chart_work.empty:
+        return events_df
+
+    events = events_df.copy()
+    work = chart_work.copy()
+
+    events["event_time"] = pd.to_datetime(events["event_time"], errors="coerce", utc=True)
+    work["open_time"] = pd.to_datetime(work["open_time"], errors="coerce", utc=True)
+
+    if "close_time" in work.columns:
+        work["close_time"] = pd.to_datetime(work["close_time"], errors="coerce", utc=True)
+    else:
+        work["close_time"] = work["open_time"] + pd.Timedelta(hours=1)
+
+    work = work.dropna(subset=["open_time", "close_time"]).sort_values("open_time")
+    events = events.dropna(subset=["event_time"]).sort_values("event_time")
+
+    if work.empty or events.empty:
+        return events_df
+
+    keep_cols = ["open_time", "close_time", "high", "low"]
+    merged = pd.merge_asof(
+        events,
+        work[keep_cols],
+        left_on="event_time",
+        right_on="open_time",
+        direction="backward",
+    )
+
+    in_candle = merged["event_time"] <= merged["close_time"]
+    merged.loc[~in_candle, ["high", "low"]] = pd.NA
+    return merged
+
+
 def add_live_strategy_event_markers(
     fig: go.Figure,
     chart_df: pd.DataFrame,
@@ -1926,8 +1967,16 @@ def add_live_strategy_event_markers(
 
     change_events, paired_indices = _build_position_change_events(event_work)
     if not change_events.empty:
+        change_events = _attach_price_candle_context(change_events, work)
+        wick_offset = _chart_price_offset(work, ratio=0.006)
         change_events["marker_y"] = change_events.apply(
-            lambda row: float(row["price"]) + (offset * 1.6 if row["new_direction"] == "SHORT" else -offset * 1.6),
+            lambda row: (
+                float(row["high"]) + wick_offset
+                if row["new_direction"] == "SHORT" and pd.notna(row.get("high"))
+                else float(row["low"]) - wick_offset
+                if row["new_direction"] == "LONG" and pd.notna(row.get("low"))
+                else float(row["price"]) + (offset * 1.1 if row["new_direction"] == "SHORT" else -offset * 1.1)
+            ),
             axis=1,
         )
         change_events["text_position"] = change_events["new_direction"].apply(
@@ -1939,10 +1988,10 @@ def add_live_strategy_event_markers(
                 x=change_events["display_time"],
                 y=change_events["marker_y"],
                 mode="markers+text",
-                marker=dict(symbol="diamond", size=17, color="#F28E2B", line=dict(width=1.5, color="black")),
+                marker=dict(symbol="diamond", size=11, color="#F28E2B", line=dict(width=1.2, color="black")),
                 text=change_events["label"],
                 textposition=change_events["text_position"],
-                textfont=dict(size=11, color="#222222"),
+                textfont=dict(size=9, color="#222222"),
                 name="Live position change",
                 showlegend=False,
                 customdata=change_events[[
@@ -2602,10 +2651,10 @@ def add_live_strategy_rsi_event_markers(
                     x=rsi_changes["display_time"],
                     y=rsi_changes["rsi_marker_y"],
                     mode="markers+text",
-                    marker=dict(symbol="diamond", size=15, color="#F28E2B", line=dict(width=1.5, color="black")),
+                    marker=dict(symbol="diamond", size=10, color="#F28E2B", line=dict(width=1.2, color="black")),
                     text=rsi_changes["label"],
                     textposition="top center",
-                    textfont=dict(size=10, color="#222222"),
+                    textfont=dict(size=9, color="#222222"),
                     name="Live position change RSI",
                     showlegend=False,
                     customdata=rsi_changes[[
