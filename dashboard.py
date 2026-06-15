@@ -1801,6 +1801,98 @@ def add_counter_momentum_hover_context(
 
 
 
+
+def _prepare_live_event_times(events: pd.DataFrame | None) -> pd.DataFrame:
+    if events is None or events.empty:
+        return pd.DataFrame()
+
+    out = events.copy()
+    if "event_time" in out.columns:
+        out["event_time"] = _to_utc_datetime_series(out["event_time"])
+    else:
+        out["event_time"] = pd.NaT
+
+    if "created_at" in out.columns:
+        out["created_at"] = _to_utc_datetime_series(out["created_at"])
+        out["event_time"] = out["event_time"].fillna(out["created_at"])
+
+    out = out.dropna(subset=["event_time"]).copy()
+    if out.empty:
+        return out
+
+    out["event_type"] = out.get("event_type", pd.Series(index=out.index, dtype="object")).fillna("").astype(str)
+    out["direction"] = out.get("direction", pd.Series(index=out.index, dtype="object")).fillna("").astype(str).str.upper()
+    out["reason_text"] = out.get("reason", pd.Series(index=out.index, dtype="object")).fillna("").astype(str)
+    out["details_text"] = out.get("details", pd.Series(index=out.index, dtype="object")).apply(_details_text)
+    out["price"] = pd.to_numeric(out.get("price"), errors="coerce")
+
+    return out.sort_values(["event_time", "created_at" if "created_at" in out.columns else "event_time"]).copy()
+
+
+def _build_position_change_events(event_work: pd.DataFrame) -> tuple[pd.DataFrame, set]:
+    """Pair same-time close/open events into one visual position-change marker."""
+    if event_work is None or event_work.empty:
+        return pd.DataFrame(), set()
+
+    ev = event_work.copy().sort_values(["event_time", "created_at" if "created_at" in event_work.columns else "event_time"]).copy()
+    closes = ev[ev["event_type"].eq("POSITION_CLOSE")].copy()
+    opens = ev[ev["event_type"].eq("POSITION_OPEN")].copy()
+
+    if closes.empty or opens.empty:
+        return pd.DataFrame(), set()
+
+    used_open_idx: set = set()
+    paired_indices: set = set()
+    rows = []
+
+    for close_idx, close_row in closes.iterrows():
+        candidates = opens.loc[~opens.index.isin(used_open_idx)].copy()
+        if candidates.empty:
+            continue
+
+        candidates["time_diff_seconds"] = (
+            candidates["event_time"] - close_row["event_time"]
+        ).abs().dt.total_seconds()
+
+        close_price = close_row.get("price")
+        if pd.notna(close_price):
+            candidates = candidates[
+                candidates["price"].notna()
+                & ((candidates["price"].astype(float) - float(close_price)).abs() <= 1e-8)
+            ]
+
+        candidates = candidates[candidates["time_diff_seconds"] <= 2.0].sort_values("time_diff_seconds")
+        if candidates.empty:
+            continue
+
+        open_idx = candidates.index[0]
+        open_row = candidates.loc[open_idx]
+        used_open_idx.add(open_idx)
+        paired_indices.update({close_idx, open_idx})
+
+        old_direction = str(close_row.get("direction") or "NA").upper()
+        new_direction = str(open_row.get("direction") or "NA").upper()
+        label = f"{old_direction[:1]}→{new_direction[:1]}"
+
+        rows.append(
+            {
+                "event_time": open_row["event_time"],
+                "display_time": open_row["event_time"].tz_convert(DISPLAY_TZ),
+                "price": float(open_row["price"]) if pd.notna(open_row.get("price")) else close_row.get("price"),
+                "old_direction": old_direction,
+                "new_direction": new_direction,
+                "label": label,
+                "reason_text": str(open_row.get("reason_text") or close_row.get("reason_text") or ""),
+                "close_trade_id": close_row.get("trade_id"),
+                "open_trade_id": open_row.get("trade_id"),
+                "close_details_text": close_row.get("details_text") or "",
+                "open_details_text": open_row.get("details_text") or "",
+            }
+        )
+
+    return pd.DataFrame(rows), paired_indices
+
+
 def add_live_strategy_event_markers(
     fig: go.Figure,
     chart_df: pd.DataFrame,
@@ -1816,14 +1908,7 @@ def add_live_strategy_event_markers(
     if work.empty:
         return fig
 
-    event_work = events.copy()
-    event_work["event_time"] = _to_utc_datetime_series(event_work["event_time"])
-
-    if "created_at" in event_work.columns:
-        event_work["created_at"] = _to_utc_datetime_series(event_work["created_at"])
-        event_work["event_time"] = event_work["event_time"].fillna(event_work["created_at"])
-
-    event_work = event_work.dropna(subset=["event_time"])
+    event_work = _prepare_live_event_times(events)
     if event_work.empty:
         return fig
 
@@ -1837,16 +1922,57 @@ def add_live_strategy_event_markers(
         return fig
 
     event_work["display_time"] = event_work["event_time"].dt.tz_convert(DISPLAY_TZ)
-    event_work["reason_text"] = event_work.get("reason", pd.Series(index=event_work.index, dtype="object")).fillna("").astype(str)
-    event_work["details_text"] = event_work.get("details", pd.Series(index=event_work.index, dtype="object")).apply(_details_text)
-    event_work["price"] = pd.to_numeric(event_work.get("price"), errors="coerce")
-
     offset = _chart_price_offset(work, ratio=0.028)
 
-    opens = event_work[event_work["event_type"].eq("POSITION_OPEN")].copy()
+    change_events, paired_indices = _build_position_change_events(event_work)
+    if not change_events.empty:
+        change_events["marker_y"] = change_events.apply(
+            lambda row: float(row["price"]) + (offset * 1.6 if row["new_direction"] == "SHORT" else -offset * 1.6),
+            axis=1,
+        )
+        change_events["text_position"] = change_events["new_direction"].apply(
+            lambda direction: "top center" if direction == "SHORT" else "bottom center"
+        )
+
+        fig.add_trace(
+            go.Scatter(
+                x=change_events["display_time"],
+                y=change_events["marker_y"],
+                mode="markers+text",
+                marker=dict(symbol="diamond", size=17, color="#F28E2B", line=dict(width=1.5, color="black")),
+                text=change_events["label"],
+                textposition=change_events["text_position"],
+                textfont=dict(size=11, color="#222222"),
+                name="Live position change",
+                showlegend=False,
+                customdata=change_events[[
+                    "old_direction",
+                    "new_direction",
+                    "price",
+                    "reason_text",
+                    "close_trade_id",
+                    "open_trade_id",
+                    "close_details_text",
+                ]],
+                hovertemplate=(
+                    "Canlı pozisyon değişimi<br>"
+                    "%{customdata[0]} → %{customdata[1]}<br>"
+                    "Çıkış / yeni giriş: %{customdata[2]:.2f}<br>"
+                    "Sebep: %{customdata[3]}<br>"
+                    "Kapanan trade: %{customdata[4]}<br>"
+                    "Yeni trade: %{customdata[5]}<br>"
+                    "Detay: %{customdata[6]}<br>"
+                    "Time: %{x}<extra></extra>"
+                ),
+            )
+        )
+
+    unpaired_events = event_work.drop(index=list(paired_indices), errors="ignore").copy()
+
+    opens = unpaired_events[unpaired_events["event_type"].eq("POSITION_OPEN")].copy()
     if not opens.empty:
-        long_opens = opens[opens["direction"].astype(str).str.upper().eq("LONG")]
-        short_opens = opens[opens["direction"].astype(str).str.upper().eq("SHORT")]
+        long_opens = opens[opens["direction"].eq("LONG")]
+        short_opens = opens[opens["direction"].eq("SHORT")]
 
         for subset, symbol, color, y_adjust, name in [
             (long_opens, "triangle-up", "#00A65A", -offset, "Live LONG entry"),
@@ -1901,22 +2027,26 @@ def add_live_strategy_event_markers(
             )
         )
 
-    closes = event_work[event_work["event_type"].eq("POSITION_CLOSE")].copy()
+    closes = unpaired_events[unpaired_events["event_type"].eq("POSITION_CLOSE")].copy()
     if not closes.empty:
+        closes["marker_y"] = closes.apply(
+            lambda row: float(row["price"]) + (offset * 1.2 if row["direction"] == "LONG" else -offset * 1.2),
+            axis=1,
+        )
         fig.add_trace(
             go.Scatter(
                 x=closes["display_time"],
-                y=closes["price"],
+                y=closes["marker_y"],
                 mode="markers",
-                marker=dict(symbol="x", size=11, color="#4D4D4D", line=dict(width=2)),
+                marker=dict(symbol="circle-x", size=13, color="#4D4D4D", line=dict(width=1.5, color="white")),
                 name="Live position close",
                 showlegend=False,
                 customdata=closes[["direction", "price", "reason_text", "details_text"]],
                 hovertemplate=(
-                    "Live position close<br>"
-                    "Closed direction: %{customdata[0]}<br>"
-                    "Exit price: %{customdata[1]:.2f}<br>"
-                    "Reason: %{customdata[2]}<br>"
+                    "Canlı pozisyon kapandı<br>"
+                    "Kapanan yön: %{customdata[0]}<br>"
+                    "Çıkış fiyatı: %{customdata[1]:.2f}<br>"
+                    "Sebep: %{customdata[2]}<br>"
                     "Details: %{customdata[3]}<br>"
                     "Time: %{x}<extra></extra>"
                 ),
@@ -1946,7 +2076,6 @@ def add_live_strategy_event_markers(
         )
 
     return fig
-
 
 def add_live_strategy_tp_segments(
     fig: go.Figure,
@@ -2408,6 +2537,209 @@ def add_rsi_signal_markers(
 # 1H RSI panel shown directly under the 1H price chart.
 # RSI values are calculated in add_ema_rsi(); this function renders RSI4/RSI14/RSI52.
 # Signal arrows and momentum highlights are copied as visual references from the official 1H chart context.
+
+def _events_with_rsi_context(event_df: pd.DataFrame, chart_df: pd.DataFrame) -> pd.DataFrame:
+    if event_df is None or event_df.empty or chart_df.empty:
+        return pd.DataFrame()
+
+    work = chart_df.copy()
+    work["open_time"] = pd.to_datetime(work["open_time"], errors="coerce", utc=True)
+    work = work.dropna(subset=["open_time"]).sort_values("open_time").reset_index(drop=True)
+    if work.empty or "rsi14" not in work.columns:
+        return pd.DataFrame()
+
+    keep_cols = ["open_time", "rsi4", "rsi14", "rsi52"]
+    keep_cols = [col for col in keep_cols if col in work.columns]
+
+    ev = event_df.copy().sort_values("event_time").reset_index(drop=True)
+    merged = pd.merge_asof(
+        ev,
+        work[keep_cols].sort_values("open_time"),
+        left_on="event_time",
+        right_on="open_time",
+        direction="backward",
+    )
+
+    merged["display_time"] = merged["event_time"].dt.tz_convert(DISPLAY_TZ)
+    merged["rsi_marker_y"] = pd.to_numeric(merged.get("rsi14"), errors="coerce")
+    return merged.dropna(subset=["rsi_marker_y"])
+
+
+def add_live_strategy_rsi_event_markers(
+    fig: go.Figure,
+    chart_df: pd.DataFrame,
+    events: pd.DataFrame | None,
+    show_markers: bool = True,
+) -> go.Figure:
+    if not show_markers or chart_df.empty or events is None or events.empty:
+        return fig
+
+    work = chart_df.copy()
+    work["open_time"] = pd.to_datetime(work["open_time"], errors="coerce", utc=True)
+    work = work.dropna(subset=["open_time"]).sort_values("open_time")
+    if work.empty:
+        return fig
+
+    event_work = _prepare_live_event_times(events)
+    if event_work.empty:
+        return fig
+
+    visible_start = work["open_time"].min()
+    visible_end = work["open_time"].max() + pd.Timedelta(hours=1)
+    event_work = event_work[
+        (event_work["event_time"] >= visible_start)
+        & (event_work["event_time"] <= visible_end)
+    ].copy()
+    if event_work.empty:
+        return fig
+
+    change_events, paired_indices = _build_position_change_events(event_work)
+    if not change_events.empty:
+        rsi_changes = _events_with_rsi_context(change_events, work)
+        if not rsi_changes.empty:
+            fig.add_trace(
+                go.Scatter(
+                    x=rsi_changes["display_time"],
+                    y=rsi_changes["rsi_marker_y"],
+                    mode="markers+text",
+                    marker=dict(symbol="diamond", size=15, color="#F28E2B", line=dict(width=1.5, color="black")),
+                    text=rsi_changes["label"],
+                    textposition="top center",
+                    textfont=dict(size=10, color="#222222"),
+                    name="Live position change RSI",
+                    showlegend=False,
+                    customdata=rsi_changes[[
+                        "old_direction",
+                        "new_direction",
+                        "price",
+                        "reason_text",
+                        "rsi4",
+                        "rsi14",
+                        "rsi52",
+                    ]],
+                    hovertemplate=(
+                        "Canlı pozisyon değişimi<br>"
+                        "%{customdata[0]} → %{customdata[1]}<br>"
+                        "Çıkış / yeni giriş: %{customdata[2]:.2f}<br>"
+                        "Sebep: %{customdata[3]}<br>"
+                        "RSI4: %{customdata[4]:.2f}<br>"
+                        "RSI14: %{customdata[5]:.2f}<br>"
+                        "RSI52: %{customdata[6]:.2f}<br>"
+                        "Time: %{x}<extra></extra>"
+                    ),
+                )
+            )
+
+    unpaired_events = event_work.drop(index=list(paired_indices), errors="ignore").copy()
+
+    opens = _events_with_rsi_context(unpaired_events[unpaired_events["event_type"].eq("POSITION_OPEN")], work)
+    if not opens.empty:
+        long_opens = opens[opens["direction"].eq("LONG")]
+        short_opens = opens[opens["direction"].eq("SHORT")]
+        for subset, symbol, color, name in [
+            (long_opens, "triangle-up", "#00A65A", "Live LONG entry RSI"),
+            (short_opens, "triangle-down", "#D62728", "Live SHORT entry RSI"),
+        ]:
+            if subset.empty:
+                continue
+            fig.add_trace(
+                go.Scatter(
+                    x=subset["display_time"],
+                    y=subset["rsi_marker_y"],
+                    mode="markers",
+                    marker=dict(symbol=symbol, size=13, color=color, line=dict(width=1, color="white")),
+                    name=name,
+                    showlegend=False,
+                    customdata=subset[["direction", "price", "reason_text", "rsi4", "rsi14", "rsi52"]],
+                    hovertemplate=(
+                        f"{name}<br>"
+                        "Direction: %{customdata[0]}<br>"
+                        "Price: %{customdata[1]:.2f}<br>"
+                        "Reason: %{customdata[2]}<br>"
+                        "RSI4: %{customdata[3]:.2f}<br>"
+                        "RSI14: %{customdata[4]:.2f}<br>"
+                        "RSI52: %{customdata[5]:.2f}<br>"
+                        "Time: %{x}<extra></extra>"
+                    ),
+                )
+            )
+
+    tp_hits = _events_with_rsi_context(event_work[event_work["event_type"].eq("TP_HIT")], work)
+    if not tp_hits.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=tp_hits["display_time"],
+                y=tp_hits["rsi_marker_y"],
+                mode="markers",
+                marker=dict(symbol="star", size=13, color="#D4A000", line=dict(width=1, color="black")),
+                name="Live TP hit RSI",
+                showlegend=False,
+                customdata=tp_hits[["direction", "price", "reason_text", "tp_source", "tp_trigger", "rsi4", "rsi14", "rsi52"]],
+                hovertemplate=(
+                    "Live TP hit<br>"
+                    "Closed direction: %{customdata[0]}<br>"
+                    "Exit price: %{customdata[1]:.2f}<br>"
+                    "Reason: %{customdata[2]}<br>"
+                    "TP source: %{customdata[3]}<br>"
+                    "TP trigger: %{customdata[4]:.2f}<br>"
+                    "RSI4: %{customdata[5]:.2f}<br>"
+                    "RSI14: %{customdata[6]:.2f}<br>"
+                    "RSI52: %{customdata[7]:.2f}<br>"
+                    "Time: %{x}<extra></extra>"
+                ),
+            )
+        )
+
+    closes = _events_with_rsi_context(unpaired_events[unpaired_events["event_type"].eq("POSITION_CLOSE")], work)
+    if not closes.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=closes["display_time"],
+                y=closes["rsi_marker_y"],
+                mode="markers",
+                marker=dict(symbol="circle-x", size=12, color="#4D4D4D", line=dict(width=1.5, color="white")),
+                name="Live position close RSI",
+                showlegend=False,
+                customdata=closes[["direction", "price", "reason_text", "rsi4", "rsi14", "rsi52"]],
+                hovertemplate=(
+                    "Canlı pozisyon kapandı<br>"
+                    "Kapanan yön: %{customdata[0]}<br>"
+                    "Çıkış fiyatı: %{customdata[1]:.2f}<br>"
+                    "Sebep: %{customdata[2]}<br>"
+                    "RSI4: %{customdata[3]:.2f}<br>"
+                    "RSI14: %{customdata[4]:.2f}<br>"
+                    "RSI52: %{customdata[5]:.2f}<br>"
+                    "Time: %{x}<extra></extra>"
+                ),
+            )
+        )
+
+    held = _events_with_rsi_context(event_work[event_work["event_type"].eq("POSITION_HELD")], work)
+    if not held.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=held["display_time"],
+                y=held["rsi_marker_y"],
+                mode="markers",
+                marker=dict(symbol="diamond-open", size=12, color="#9467BD", line=dict(width=2)),
+                name="Position held RSI",
+                showlegend=False,
+                customdata=held[["direction", "price", "reason_text", "rsi4", "rsi14", "rsi52"]],
+                hovertemplate=(
+                    "Position kept open<br>"
+                    "Direction: %{customdata[0]}<br>"
+                    "Price: %{customdata[1]:.2f}<br>"
+                    "Reason: %{customdata[2]}<br>"
+                    "RSI4: %{customdata[3]:.2f}<br>"
+                    "RSI14: %{customdata[4]:.2f}<br>"
+                    "RSI52: %{customdata[5]:.2f}<br>"
+                    "Time: %{x}<extra></extra>"
+                ),
+            )
+        )
+
+    return fig
+
 def make_1h_rsi_chart(
     df: pd.DataFrame,
     title: str,
@@ -2417,6 +2749,8 @@ def make_1h_rsi_chart(
     show_momentum: bool = False,
     momentum_threshold_pct: float = 35.0,
     momentum_reference_events: pd.DataFrame | None = None,
+    live_strategy_events: pd.DataFrame | None = None,
+    show_live_strategy: bool = False,
 ) -> go.Figure:
     plot_df = df.copy()
 
@@ -2484,6 +2818,13 @@ def make_1h_rsi_chart(
             marker_df=signal_markers,
             name_prefix="1H SMA Pipeline Signal",
         )
+
+    fig = add_live_strategy_rsi_event_markers(
+        fig=fig,
+        chart_df=plot_df,
+        events=live_strategy_events,
+        show_markers=show_live_strategy,
+    )
 
     fig.update_layout(
         title="",
@@ -3002,7 +3343,7 @@ with col_1h_a:
     show_zones_1h = st.toggle("1H yakın zone çizgileri", value=True, key="show_zones_1h")
 
 with col_1h_b:
-    show_signal_markers_1h = st.toggle("1H resmî sinyal markerları", value=True, key="show_signal_markers_1h")
+    show_signal_markers_1h = st.toggle("1H resmî sinyal markerları", value=False, key="show_signal_markers_1h_v2")
 
 with col_1h_c:
     show_momentum_1h = st.toggle("1H momentum mumları", value=True, key="show_momentum_1h")
@@ -3044,6 +3385,8 @@ st.plotly_chart(
         show_momentum=show_momentum_1h,
         momentum_threshold_pct=momentum_threshold_pct,
         momentum_reference_events=hourly_signal_reference_events,
+        live_strategy_events=strategy_1h_events,
+        show_live_strategy=show_live_strategy_1h,
     ),
     use_container_width=True,
     config=PLOTLY_CONFIG,
