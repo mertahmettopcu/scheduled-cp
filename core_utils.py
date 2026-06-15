@@ -941,15 +941,10 @@ def build_ichimoku_new_signal_message(
     current_signal = normalize_signal(current_signal)
     previous_signal = normalize_signal(previous_signal)
 
-    app_link = _build_app_link(pair, streamlit_app_url)
-
     lines = [
         f"{pair}",
         f"1d candle: {_format_candle_time_for_message(candle_time_1d)}",
     ]
-
-    if app_link:
-        lines.append(f"Chart: {app_link}")
 
     lines.extend([
         "",
@@ -982,15 +977,10 @@ def build_ichimoku_tp_confirmed_message(
     streamlit_app_url: str,
 ) -> str:
     signal_type = normalize_signal(trade_state.get("signal_type"))
-    app_link = _build_app_link(pair, streamlit_app_url)
-
     lines = [
         f"{pair}",
         f"1d candle: {_format_candle_time_for_message(candle_time_1d)}",
     ]
-
-    if app_link:
-        lines.append(f"Chart: {app_link}")
 
     lines.extend([
         "",
@@ -1020,15 +1010,10 @@ def build_ichimoku_confirmation_failed_message(
 ) -> str:
     previous_signal = normalize_signal(trade_state.get("signal_type"))
     current_signal = normalize_signal(current_signal)
-    app_link = _build_app_link(pair, streamlit_app_url)
-
     lines = [
         f"{pair}",
         f"1d candle: {_format_candle_time_for_message(candle_time_1d)}",
     ]
-
-    if app_link:
-        lines.append(f"Chart: {app_link}")
 
     lines.extend([
         "",
@@ -1060,15 +1045,10 @@ def build_ichimoku_tp_hit_message(
     streamlit_app_url: str,
 ) -> str:
     signal_type = normalize_signal(trade_state.get("signal_type"))
-    app_link = _build_app_link(pair, streamlit_app_url)
-
     lines = [
         f"{pair}",
         f"1d candle: {_format_candle_time_for_message(candle_time_1d)}",
     ]
-
-    if app_link:
-        lines.append(f"Chart: {app_link}")
 
     lines.extend([
         "",
@@ -1098,15 +1078,10 @@ def build_ichimoku_state_closed_message(
 ) -> str:
     previous_signal = normalize_signal(trade_state.get("signal_type"))
     current_signal = normalize_signal(current_signal)
-    app_link = _build_app_link(pair, streamlit_app_url)
-
     lines = [
         f"{pair}",
         f"1d candle: {_format_candle_time_for_message(candle_time_1d)}",
     ]
-
-    if app_link:
-        lines.append(f"Chart: {app_link}")
 
     lines.extend([
         "",
@@ -1134,15 +1109,10 @@ def build_ichimoku_reversal_message(
 ) -> str:
     previous_signal = normalize_signal(previous_signal)
     current_signal = normalize_signal(current_signal)
-    app_link = _build_app_link(pair, streamlit_app_url)
-
     lines = [
         f"{pair}",
         f"1d candle: {_format_candle_time_for_message(candle_time_1d)}",
     ]
-
-    if app_link:
-        lines.append(f"Chart: {app_link}")
 
     lines.extend([
         "",
@@ -1203,17 +1173,12 @@ def build_telegram_message(
     def fmt(x):
         return format_price(x)
         
-    app_link = _build_app_link(pair, streamlit_app_url)
-
     lines = [
         f"{pair}",
         f"15m candle: {_format_candle_time_for_message(candle_time_15m)}",
         f"1h candle: {_format_candle_time_for_message(candle_time_1h)}",
         f"1d candle: {_format_candle_time_for_message(candle_time_1d)}",
     ]
-
-    if app_link:
-        lines.append(f"Chart: {app_link}")
 
     lines.extend([
         "",
