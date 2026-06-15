@@ -1406,6 +1406,34 @@ def _chart_price_offset(chart_df: pd.DataFrame, ratio: float = 0.012) -> float:
 
 
 
+def _infer_candle_delta(chart_df: pd.DataFrame, fallback: pd.Timedelta = pd.Timedelta(hours=1)) -> pd.Timedelta:
+    if chart_df is None or chart_df.empty or "open_time" not in chart_df.columns:
+        return fallback
+    times = pd.to_datetime(chart_df["open_time"], errors="coerce", utc=True).dropna().sort_values()
+    if len(times) < 2:
+        return fallback
+    delta = times.diff().dropna().median()
+    if pd.isna(delta) or delta <= pd.Timedelta(0):
+        return fallback
+    return delta
+
+
+def _infer_candle_label(chart_df: pd.DataFrame) -> str:
+    delta = _infer_candle_delta(chart_df)
+    minutes = int(round(delta.total_seconds() / 60))
+    if minutes == 15:
+        return "15M Mum"
+    if minutes == 60:
+        return "1H Mum"
+    if minutes == 1440:
+        return "1D Mum"
+    if minutes < 60:
+        return f"{minutes}M Mum"
+    if minutes % 60 == 0 and minutes < 1440:
+        return f"{minutes // 60}H Mum"
+    return "Mum"
+
+
 def _fmt_hover_price(value) -> str:
     if value is None or pd.isna(value):
         return "NA"
@@ -2303,7 +2331,11 @@ def add_live_strategy_tp_segments(
         return fig
 
     visible_start = work["open_time"].min()
-    visible_end = work["open_time"].max() + pd.Timedelta(hours=1)
+    if "close_time" in work.columns:
+        work["close_time"] = pd.to_datetime(work["close_time"], errors="coerce", utc=True)
+        visible_end = work["close_time"].max()
+    else:
+        visible_end = work["open_time"].max() + _infer_candle_delta(work)
 
     event_work = events.copy() if events is not None else pd.DataFrame()
     if not event_work.empty:
@@ -2391,7 +2423,11 @@ def add_live_strategy_trade_segments(
     work = chart_df.copy()
     work["open_time"] = pd.to_datetime(work["open_time"], errors="coerce", utc=True)
     visible_start = work["open_time"].min()
-    visible_end = work["open_time"].max() + pd.Timedelta(hours=1)
+    if "close_time" in work.columns:
+        work["close_time"] = pd.to_datetime(work["close_time"], errors="coerce", utc=True)
+        visible_end = work["close_time"].max()
+    else:
+        visible_end = work["open_time"].max() + _infer_candle_delta(work)
 
     ev = events.copy()
     ev["event_time"] = _to_utc_datetime_series(ev["event_time"])
@@ -2520,7 +2556,7 @@ def make_price_ema_chart(
     fig = add_candle_hover_capture_layer(
         fig=fig,
         chart_df=plot_df,
-        label="1H Mum",
+        label=_infer_candle_label(plot_df),
         marker_size=38,
     )
 
@@ -3271,6 +3307,7 @@ with st.expander("Gösterge açıklamaları", expanded=False):
 - **Pozisyon kapanışı:** Gri X.
 - **Counter-momentum + ters sinyal geldiği halde RSI4 onayı olmadığı için korunan pozisyon:** Mor boş elmas.
 - **15M sinyal referansı:** 15M'in kendi sinyali değildir; 1H sinyalinin 15M içi referans noktasıdır.
+- **15M canlı 1H pozisyon ve TP:** Canlı strateji yine 1H kararıdır; 15M grafikte yalnızca aynı event/TP çizgileri daha yakın zaman kırılımında gösterilir.
 - **1D Ichimoku TP/SL:** Sinyal mumunun kapanışı entry referansıdır. LONG için SL bulut alt sınırı, SHORT için SL bulut üst sınırıdır. TP = entry referansı ± {ichimoku_rr_multiplier:g} × SL mesafesi.
 - **1D Ichimoku TP çizgisi:** Sarı düz yatay çizgi. Sinyal marker mumunda görünür ama TP çizgisi yalnızca bir sonraki günlük mum aynı Ichimoku sinyal state'iyle kapanırsa çizilir. Çizgi sinyal mumundan başlar; TP'ye temas edilirse orada, TP'den önce zıt Ichimoku sinyali gelirse zıt sinyalde biter.
         """
@@ -3534,16 +3571,19 @@ st.plotly_chart(
 
 st.subheader(f"{selected_pair} — 15M (son 1 gün)")
 
-col_15m_a, col_15m_b, col_15m_c = st.columns(3)
+col_15m_a, col_15m_b, col_15m_c, col_15m_d = st.columns(4)
 
 with col_15m_a:
     show_zones_15m = st.toggle("15M yakın zone çizgileri", value=True, key="show_zones_15m")
 
 with col_15m_b:
-    show_signal_markers_15m = st.toggle("15M 1H sinyal referansı", value=True, key="show_signal_markers_15m")
+    show_signal_markers_15m = st.toggle("15M 1H sinyal referansı", value=False, key="show_signal_markers_15m_v2")
 
 with col_15m_c:
     show_momentum_15m = st.toggle("15M momentum mumları", value=True, key="show_momentum_15m")
+
+with col_15m_d:
+    show_live_strategy_15m = st.toggle("15M canlı 1H pozisyon ve TP", value=True, key="show_live_strategy_15m")
 
 st.plotly_chart(
     make_price_ema_chart(
@@ -3559,6 +3599,10 @@ st.plotly_chart(
         show_momentum=show_momentum_15m,
         momentum_threshold_pct=momentum_threshold_pct,
         momentum_reference_events=m15_intrabar_signal_reference_events,
+        live_strategy_state=strategy_1h_state,
+        live_strategy_events=strategy_1h_events,
+        live_strategy_tp_history=strategy_1h_tp_history,
+        show_live_strategy=show_live_strategy_15m,
     ),
     use_container_width=True,
     config=PLOTLY_CONFIG,
