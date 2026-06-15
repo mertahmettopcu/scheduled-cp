@@ -1404,6 +1404,100 @@ def _chart_price_offset(chart_df: pd.DataFrame, ratio: float = 0.012) -> float:
     return float(visible_high - visible_low) * ratio
 
 
+
+
+def _fmt_hover_price(value) -> str:
+    if value is None or pd.isna(value):
+        return "NA"
+    try:
+        return f"{float(value):,.2f}"
+    except Exception:
+        return str(value)
+
+
+def _clean_hover_value(value) -> str:
+    if value is None or pd.isna(value):
+        return "NA"
+    text = str(value).strip()
+    return text if text else "NA"
+
+
+def _build_price_candle_hover_text(row: pd.Series, label: str = "1H Mum") -> str:
+    lines = [
+        f"🕯️ {label}",
+        f"Time: {_fmt_display_time(row.get('open_time')) or _clean_hover_value(row.get('display_time'))}",
+        "O/H/L/C: "
+        f"{_fmt_hover_price(row.get('open'))} / "
+        f"{_fmt_hover_price(row.get('high'))} / "
+        f"{_fmt_hover_price(row.get('low'))} / "
+        f"{_fmt_hover_price(row.get('close'))}",
+    ]
+
+    lower_zone = row.get("hover_lower_zone")
+    upper_zone = row.get("hover_upper_zone")
+    if not pd.isna(lower_zone) and not pd.isna(upper_zone):
+        lines.append(f"Zone: {_fmt_hover_price(lower_zone)} → {_fmt_hover_price(upper_zone)}")
+
+        lower_buffer = row.get("hover_lower_zone_plus_buffer")
+        upper_buffer = row.get("hover_upper_zone_minus_buffer")
+        if not pd.isna(lower_buffer) and not pd.isna(upper_buffer):
+            lines.append(f"Buffer: {_fmt_hover_price(lower_buffer)} / {_fmt_hover_price(upper_buffer)}")
+
+    signal = _clean_hover_value(row.get("official_signal", "NA"))
+    if signal not in {"NA", "NEUTRAL", "nan", "None"}:
+        lines.append(f"Signal: {signal}")
+
+    cm_status = _clean_hover_value(row.get("cm_status_text", "NA"))
+    if cm_status not in {"NA", "no pipeline warning", "nan", "None"}:
+        lines.append(f"CM: {cm_status}")
+        counter_direction = _clean_hover_value(row.get("cm_counter_direction_text", "NA"))
+        ratio = _clean_hover_value(row.get("cm_last_ratio_text", "NA"))
+        if counter_direction != "NA":
+            lines.append(f"Counter: {counter_direction}")
+        if ratio != "NA":
+            lines.append(f"Ratio: {ratio}")
+
+    return "<br>".join(lines)
+
+
+def add_candle_hover_capture_layer(
+    fig: go.Figure,
+    chart_df: pd.DataFrame,
+    label: str = "1H Mum",
+    marker_size: int = 36,
+) -> go.Figure:
+    if chart_df.empty or not {"display_time", "high", "low"}.issubset(chart_df.columns):
+        return fig
+
+    work = chart_df.copy()
+    work["hover_mid_price"] = (
+        pd.to_numeric(work["high"], errors="coerce")
+        + pd.to_numeric(work["low"], errors="coerce")
+    ) / 2.0
+    work["candle_hover_text"] = work.apply(lambda row: _build_price_candle_hover_text(row, label=label), axis=1)
+    work = work.dropna(subset=["hover_mid_price"]).copy()
+
+    if work.empty:
+        return fig
+
+    fig.add_trace(
+        go.Scatter(
+            x=work["display_time"],
+            y=work["hover_mid_price"],
+            mode="markers",
+            name=f"{label} hover",
+            showlegend=False,
+            marker=dict(
+                size=marker_size,
+                color="rgba(0,0,0,0.01)",
+                line=dict(width=0),
+            ),
+            customdata=work["candle_hover_text"],
+            hovertemplate="%{customdata}<extra></extra>",
+        )
+    )
+    return fig
+
 def latest_long_short_markers(
     df: pd.DataFrame,
     long_col: str = "long_signal",
@@ -2419,48 +2513,16 @@ def make_price_ema_chart(
         close=plot_df["close"],
         name="Price",
         showlegend=False,
-        customdata=plot_df[
-            [
-                "hover_upper_zone",
-                "hover_lower_zone",
-                "hover_upper_zone_minus_buffer",
-                "hover_lower_zone_plus_buffer",
-                "cm_status_text",
-                "cm_reference_signal_text",
-                "cm_counter_direction_text",
-                "cm_last_ratio_text",
-                "cm_last_notified_ratio_text",
-                "cm_warning_count_text",
-                "cm_updated_at_text",
-                "cm_official_note_text",
-            ]
-        ],
-        hovertemplate=(
-            "Time: %{x}<br>"
-            "Open: %{open}<br>"
-            "High: %{high}<br>"
-            "Low: %{low}<br>"
-            "Close: %{close}<br>"
-            "<br>"
-            "Open-based Manual Zone Range:<br>"
-            "Upper Zone: %{customdata[0]:.2f}<br>"
-            "Lower Zone: %{customdata[1]:.2f}<br>"
-            "Upper Zone - Buffer: %{customdata[2]:.2f}<br>"
-            "Lower Zone + Buffer: %{customdata[3]:.2f}<br>"
-            "<br>"
-            "Pipeline Counter Momentum:<br>"
-            "Status: %{customdata[4]}<br>"
-            "Reference signal: %{customdata[5]}<br>"
-            "Counter direction: %{customdata[6]}<br>"
-            "Last ratio: %{customdata[7]}<br>"
-            "Last notified ratio: %{customdata[8]}<br>"
-            "Warning count: %{customdata[9]}<br>"
-            "Updated at: %{customdata[10]}<br>"
-            "%{customdata[11]}<br>"
-            "<extra></extra>"
-        ),
+        hoverinfo="skip",
     )
 )
+
+    fig = add_candle_hover_capture_layer(
+        fig=fig,
+        chart_df=plot_df,
+        label="1H Mum",
+        marker_size=38,
+    )
 
     ma_lengths = (4, 16, 65, 120, 168)
 
@@ -2541,6 +2603,8 @@ def make_price_ema_chart(
         xaxis_rangeslider_visible=False,
         height=520,
         hovermode="closest",
+        hoverdistance=90,
+        spikedistance=90,
         legend_orientation="h",
         legend_yanchor="bottom",
         legend_y=1.02,
@@ -2979,30 +3043,16 @@ def make_ichimoku_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | None
                     close=plot_df["close"],
                     name="Price",
                     showlegend=False,
-                    customdata=plot_df[
-                        [
-                            "hover_upper_zone",
-                            "hover_lower_zone",
-                            "hover_upper_zone_minus_buffer",
-                            "hover_lower_zone_plus_buffer",
-                        ]
-                    ],
-                    hovertemplate=(
-                        "Time: %{x}<br>"
-                        "Open: %{open}<br>"
-                        "High: %{high}<br>"
-                        "Low: %{low}<br>"
-                        "Close: %{close}<br>"
-                        "<br>"
-                        "Open-based Manual Zone Range:<br>"
-                        "Upper Zone: %{customdata[0]:.2f}<br>"
-                        "Lower Zone: %{customdata[1]:.2f}<br>"
-                        "Upper Zone - Buffer: %{customdata[2]:.2f}<br>"
-                        "Lower Zone + Buffer: %{customdata[3]:.2f}<br>"
-                        "<extra></extra>"
-                    ),
+                    hoverinfo="skip",
                 )
             )
+
+    fig = add_candle_hover_capture_layer(
+        fig=fig,
+        chart_df=plot_df,
+        label="1D Mum",
+        marker_size=34,
+    )
 
     # Tenkan / Kijun / Chikou
     fig.add_trace(
@@ -3126,7 +3176,9 @@ def make_ichimoku_chart(df: pd.DataFrame, title: str, zones: pd.DataFrame | None
         yaxis_title="Price",
         xaxis_rangeslider_visible=False,
         height=520,
-        hovermode="x unified",
+        hovermode="closest",
+        hoverdistance=90,
+        spikedistance=90,
         legend_orientation="h",
         legend_yanchor="bottom",
         legend_y=1.02,
