@@ -19,6 +19,8 @@ MOMENTUM_THRESHOLD = 0.35
 SMA_BUFFER = 0.0
 COUNTER_RSI_LONG_TO_SHORT_MAX = 30.0
 COUNTER_RSI_SHORT_TO_LONG_MIN = 70.0
+NORMAL_REVERSE_LONG_TO_SHORT_RSI4_MIN = 30.0
+NORMAL_REVERSE_SHORT_TO_LONG_RSI4_MAX = 70.0
 TP_AFTER_LONG_RSI4_MIN = 80.5
 TP_AFTER_SHORT_RSI4_MAX = 20.0
 SMA_LENGTHS = (65, 120, 168)
@@ -881,6 +883,20 @@ def _counter_rsi_approved(position_direction: str, rsi4: Optional[float]) -> boo
     return rsi4 >= COUNTER_RSI_SHORT_TO_LONG_MIN
 
 
+def _normal_reverse_rsi_approved(position_direction: str, rsi4: Optional[float]) -> bool:
+    if rsi4 is None:
+        return False
+    if position_direction == "LONG":
+        return rsi4 > NORMAL_REVERSE_LONG_TO_SHORT_RSI4_MIN
+    return rsi4 < NORMAL_REVERSE_SHORT_TO_LONG_RSI4_MAX
+
+
+def _normal_reverse_rsi_filter_text(position_direction: str) -> str:
+    if position_direction == "LONG":
+        return f"LONG→SHORT requires RSI4 > {NORMAL_REVERSE_LONG_TO_SHORT_RSI4_MIN:g}"
+    return f"SHORT→LONG requires RSI4 < {NORMAL_REVERSE_SHORT_TO_LONG_RSI4_MAX:g}"
+
+
 def _process_closed_candle(
     *,
     supabase,
@@ -1009,15 +1025,40 @@ def _process_closed_candle(
                 )
                 return state, messages
 
+            if not _normal_reverse_rsi_approved(state["direction"], rsi4):
+                append_event(
+                    supabase,
+                    {
+                        "pair": state["pair"],
+                        "trade_id": state["trade_id"],
+                        "event_type": "POSITION_HELD",
+                        "event_time": _iso(row["close_time"]),
+                        "direction": state["direction"],
+                        "price": float(row["close"]),
+                        "reason": "NORMAL_REVERSE_SIGNAL_RSI_REJECTED",
+                        "details": {
+                            "rsi4": rsi4,
+                            "official_signal": official_signal,
+                            "filter": _normal_reverse_rsi_filter_text(state["direction"]),
+                        },
+                    },
+                )
+                return state, messages
+
             old_direction = state["direction"]
             old_trade_id = state["trade_id"]
+            filter_text = _normal_reverse_rsi_filter_text(old_direction)
             state = _close_position(
                 supabase=supabase,
                 state=state,
                 exit_time=row["close_time"],
                 exit_price=float(row["close"]),
-                reason="NORMAL_REVERSE_SIGNAL",
-                details={"official_signal": official_signal},
+                reason="NORMAL_REVERSE_SIGNAL_RSI_APPROVED",
+                details={
+                    "official_signal": official_signal,
+                    "rsi4": rsi4,
+                    "filter": filter_text,
+                },
             )
             state, _ = _open_position(
                 supabase=supabase,
@@ -1026,7 +1067,7 @@ def _process_closed_candle(
                 direction=opposite,
                 entry_time=row["close_time"],
                 entry_price=float(row["close"]),
-                reason="NORMAL_REVERSE_SIGNAL",
+                reason="NORMAL_REVERSE_SIGNAL_RSI_APPROVED",
                 zones=zones,
             )
             messages.append(
@@ -1036,10 +1077,11 @@ def _process_closed_candle(
                     new_direction=opposite,
                     candle_time=row["close_time"],
                     price=float(row["close"]),
-                    reason="Closed opposite signal without counter-momentum",
+                    reason="Closed opposite signal without counter-momentum; RSI4 filter approved reversal",
                     details=[
                         f"Official signal: {official_signal}",
-                        "RSI4 filter: not used",
+                        f"RSI4: {'NA' if rsi4 is None else f'{rsi4:.2f}'}",
+                        f"Filter: {filter_text}",
                         f"Closed trade: {old_trade_id}",
                     ],
                 )
@@ -1134,6 +1176,8 @@ def _reason_description(reason: str) -> str:
     descriptions = {
         "OFFICIAL_SIGNAL_WHILE_FLAT": "No position was open; the closed 1H candle has an official directional signal.",
         "NORMAL_REVERSE_SIGNAL": "A closed opposite signal appeared without counter-momentum; the old position closed and the opposite position opened.",
+        "NORMAL_REVERSE_SIGNAL_RSI_APPROVED": "A closed opposite signal appeared without counter-momentum, and the RSI4 normal-reversal filter approved the direction change.",
+        "NORMAL_REVERSE_SIGNAL_RSI_REJECTED": "A closed opposite signal appeared without counter-momentum, but the RSI4 normal-reversal filter rejected the direction change.",
         "COUNTER_MOMENTUM_PLUS_REVERSE_SIGNAL_RSI_APPROVED": "Counter-momentum and a closed opposite signal occurred together; RSI4 strongly confirmed the opposite direction.",
         "TP_AFTER_TARGET_BUFFER_CLOSE": "TP was hit and the candle closed inside the target-zone buffer; the same direction reopened with the target shifted one zone forward.",
         "TP_AFTER_SAME_DIRECTION_MOMENTUM": "TP was hit; the candle did not close in the target buffer but had at least 35% same-direction momentum, so the same direction reopened with a shifted target.",
