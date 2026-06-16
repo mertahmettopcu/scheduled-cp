@@ -1741,12 +1741,26 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _timezone_offset_label(ts: pd.Timestamp) -> str:
+    offset = ts.utcoffset()
+    if offset is None:
+        return "UTC"
+
+    total_minutes = int(offset.total_seconds() // 60)
+    sign = "+" if total_minutes >= 0 else "-"
+    hours, minutes = divmod(abs(total_minutes), 60)
+
+    if minutes == 0:
+        return f"UTC{sign}{hours}"
+    return f"UTC{sign}{hours:02d}:{minutes:02d}"
+
+
 def _format_candle_time_for_message(iso_ts: str) -> str:
     ts = pd.Timestamp(iso_ts)
     if ts.tzinfo is None:
         ts = ts.tz_localize("UTC")
     ts = ts.tz_convert(DISPLAY_TZ)
-    return ts.strftime("%Y-%m-%d %H:%M")
+    return f"{ts.strftime('%Y-%m-%d %H:%M')} ({_timezone_offset_label(ts)} / İstanbul)"
 
 
 def _build_app_link(pair: str, streamlit_app_url: str) -> str:
