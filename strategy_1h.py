@@ -44,6 +44,32 @@ def _iso(value) -> str:
     return ts.tz_convert("UTC").isoformat().replace("+00:00", "Z")
 
 
+def _utc_offset_label(ts: pd.Timestamp) -> str:
+    offset = ts.utcoffset()
+    if offset is None:
+        return "UTC"
+
+    total_minutes = int(offset.total_seconds() // 60)
+    sign = "+" if total_minutes >= 0 else "-"
+    hours, minutes = divmod(abs(total_minutes), 60)
+
+    if minutes == 0:
+        return f"UTC{sign}{hours}"
+    return f"UTC{sign}{hours:02d}:{minutes:02d}"
+
+
+def _display_time_tr(value) -> str:
+    if value is None or pd.isna(value):
+        return "NA"
+
+    ts = pd.Timestamp(value)
+    if ts.tzinfo is None:
+        ts = ts.tz_localize("UTC")
+
+    ts = ts.tz_convert("Europe/Istanbul")
+    return f"{ts.strftime('%Y-%m-%d %H:%M')} ({_utc_offset_label(ts)} / İstanbul)"
+
+
 def _safe_float(value):
     if value is None or pd.isna(value):
         return None
@@ -1414,7 +1440,7 @@ def build_position_open_message(
             f"Reason: {_reason_description(reason)}",
             f"Zone: {format_price(active_lower)} → {format_price(active_upper)}",
             f"Target: {format_price(target_zone)}",
-            f"Time: {_iso(entry_time)}",
+            f"Time TR: {_display_time_tr(entry_time)}",
         ]
     )
 
@@ -1437,7 +1463,7 @@ def build_position_change_message(
             f"Price: {format_price(price)}",
             f"Reason: {_reason_description(reason)}",
             *_compact_details(details, max_lines=3),
-            f"Time: {_iso(candle_time)}",
+            f"Time TR: {_display_time_tr(candle_time)}",
         ]
     )
 
@@ -1462,7 +1488,7 @@ def build_position_held_message(
             f"Opposite: {opposite_signal}",
             f"Counter: {ratio_text}",
             f"RSI4: {rsi_text}",
-            f"Time: {_iso(candle_time)}",
+            f"Time TR: {_display_time_tr(candle_time)}",
         ]
     )
 
@@ -1488,7 +1514,7 @@ def build_tp_update_message(
             f"TP: {source} @ {format_price(trigger)}",
             f"Target: {format_price(target_zone)}",
             f"Reason: {_reason_description(reason)}",
-            f"Time: {_iso(candle_time)}",
+            f"Time TR: {_display_time_tr(candle_time)}",
         ]
     )
 
@@ -1511,7 +1537,7 @@ def build_tp_hit_message(
             f"Exit: {format_price(exit_price)}",
             f"TP: {source} @ {format_price(trigger)}",
             f"Target: {format_price(target_zone)}",
-            f"Time: {_iso(candle_time)}",
+            f"Time TR: {_display_time_tr(candle_time)}",
         ]
     )
 
@@ -1538,7 +1564,7 @@ def build_tp_near_message(
             f"{observed_label}: {format_price(observed_price)}",
             f"Remaining: {format_price(remaining)}",
             f"Progress: {progress_pct:.1f}%",
-            f"Time: {_iso(candle_time)}",
+            f"Time TR: {_display_time_tr(candle_time)}",
         ]
     )
 
@@ -1557,7 +1583,7 @@ def build_wait_message(
             f"Reason: {reason}",
             f"RSI4: {'NA' if rsi4 is None else f'{rsi4:.2f}'}",
             f"Signal: {official_signal}",
-            f"Time: {_iso(candle_time)}",
+            f"Time TR: {_display_time_tr(candle_time)}",
         ]
     )
 
