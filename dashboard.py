@@ -1655,13 +1655,21 @@ def _build_price_candle_hover_text(row: pd.Series, label: str = "1H Mum") -> str
 
     cm_status = _clean_hover_value(row.get("cm_status_text", "NA"))
     if cm_status not in {"NA", "no pipeline warning", "nan", "None"}:
-        lines.append(f"CM: {cm_status}")
+        lines.append(f"CM intrabar: {cm_status}")
+
         counter_direction = _clean_hover_value(row.get("cm_counter_direction_text", "NA"))
-        ratio = _clean_hover_value(row.get("cm_last_ratio_text", "NA"))
+        intrabar_ratio = _clean_hover_value(row.get("cm_last_ratio_text", "NA"))
+        final_ratio = _clean_hover_value(row.get("cm_final_ratio_text", "NA"))
+        final_cm = _clean_hover_value(row.get("cm_final_counter_momentum_text", "NA"))
+
         if counter_direction != "NA":
             lines.append(f"Counter: {counter_direction}")
-        if ratio != "NA":
-            lines.append(f"Ratio: {ratio}")
+
+        if intrabar_ratio != "NA" or final_ratio != "NA":
+            lines.append(f"Ratio intrabar/final: {intrabar_ratio} / {final_ratio}")
+
+        if final_cm != "NA":
+            lines.append(f"Final CM: {final_cm}")
 
     return "<br>".join(lines)
 
@@ -1812,6 +1820,147 @@ def add_signal_markers(
         )
 
     return fig
+
+
+def add_final_counter_momentum_hover_context(
+    chart_df: pd.DataFrame,
+    zones: pd.DataFrame | None,
+    marker_df: pd.DataFrame | None,
+    momentum_threshold_pct: float = 35.0,
+    live_strategy_events: pd.DataFrame | None = None,
+    live_strategy_state: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """
+    Add final closed-candle counter-momentum context to candle hover text.
+
+    Intrabar CM comes from counter_momentum_states. Final CM is recalculated from
+    the candle's final open-close body and the same live-position reference used
+    by the dashboard momentum shading. This prevents intrabar warnings from
+    looking like confirmed final counter-momentum after the candle body shrinks.
+    """
+    out = chart_df.copy()
+
+    final_cols = [
+        "cm_final_ratio_text",
+        "cm_final_counter_momentum_text",
+    ]
+    out = out.drop(columns=[col for col in final_cols if col in out.columns], errors="ignore")
+    out["cm_final_ratio_text"] = "NA"
+    out["cm_final_counter_momentum_text"] = "NA"
+
+    if out.empty or "open_time" not in out.columns or zones is None or zones.empty:
+        return out
+
+    zone_work = zones.copy()
+    if "zone_value" not in zone_work.columns:
+        return out
+
+    zone_work["zone_value"] = pd.to_numeric(zone_work["zone_value"], errors="coerce")
+    zone_values = (
+        zone_work["zone_value"]
+        .dropna()
+        .drop_duplicates()
+        .sort_values(ascending=False)
+        .tolist()
+    )
+
+    if not zone_values:
+        return out
+
+    work = out.copy()
+
+    if live_strategy_events is not None or live_strategy_state is not None:
+        work = add_live_position_reference_state(
+            work,
+            live_strategy_events=live_strategy_events,
+            live_strategy_state=live_strategy_state,
+        )
+    else:
+        work = add_signal_reference_state(
+            work,
+            marker_df if marker_df is not None else pd.DataFrame(),
+        )
+
+    if work.empty:
+        return out
+
+    threshold_pct = max(float(momentum_threshold_pct or 0), 0.0)
+
+    def _opening_zone_distance(open_price):
+        if pd.isna(open_price):
+            return None
+
+        open_price = float(open_price)
+        upper_candidates = [z for z in zone_values if z > open_price]
+        lower_candidates = [z for z in zone_values if z < open_price]
+
+        if not upper_candidates or not lower_candidates:
+            return None
+
+        upper_zone = min(upper_candidates)
+        lower_zone = max(lower_candidates)
+        distance = float(upper_zone) - float(lower_zone)
+        return distance if distance > 0 else None
+
+    rows = []
+    for _, row in work.iterrows():
+        open_time = row.get("open_time")
+        distance = _opening_zone_distance(row.get("open"))
+
+        if distance is None:
+            rows.append(
+                {
+                    "open_time": open_time,
+                    "cm_final_ratio_text_calc": "NA",
+                    "cm_final_counter_momentum_text_calc": "NA",
+                }
+            )
+            continue
+
+        open_price = float(row.get("open"))
+        close_price = float(row.get("close"))
+        body_size = abs(close_price - open_price)
+        ratio_pct = (body_size / distance) * 100.0
+
+        if close_price > open_price:
+            candle_direction = "LONG"
+        elif close_price < open_price:
+            candle_direction = "SHORT"
+        else:
+            candle_direction = "NEUTRAL"
+
+        raw_reference_signal = row.get("reference_signal")
+        reference_signal = "" if pd.isna(raw_reference_signal) else str(raw_reference_signal).upper()
+
+        is_counter_direction = (
+            (reference_signal == "LONG" and candle_direction == "SHORT")
+            or (reference_signal == "SHORT" and candle_direction == "LONG")
+        )
+        final_counter_momentum = bool(is_counter_direction and ratio_pct >= threshold_pct)
+
+        rows.append(
+            {
+                "open_time": open_time,
+                "cm_final_ratio_text_calc": f"{ratio_pct:.2f}%",
+                "cm_final_counter_momentum_text_calc": "Yes" if final_counter_momentum else "No",
+            }
+        )
+
+    calc = pd.DataFrame(rows)
+    if calc.empty:
+        return out
+
+    out["open_time"] = pd.to_datetime(out["open_time"], errors="coerce", utc=True)
+    calc["open_time"] = pd.to_datetime(calc["open_time"], errors="coerce", utc=True)
+
+    merged = out.merge(calc, on="open_time", how="left")
+    merged["cm_final_ratio_text"] = merged["cm_final_ratio_text_calc"].fillna(merged["cm_final_ratio_text"])
+    merged["cm_final_counter_momentum_text"] = merged["cm_final_counter_momentum_text_calc"].fillna(merged["cm_final_counter_momentum_text"])
+
+    return merged.drop(
+        columns=["cm_final_ratio_text_calc", "cm_final_counter_momentum_text_calc"],
+        errors="ignore",
+    )
 
 
 def add_ichimoku_signal_markers(
@@ -2786,6 +2935,14 @@ def make_price_ema_chart(
     plot_df = add_counter_momentum_hover_context(
         chart_df=plot_df,
         counter_momentum_states=counter_momentum_states,
+    )
+    plot_df = add_final_counter_momentum_hover_context(
+        chart_df=plot_df,
+        zones=zones,
+        marker_df=momentum_reference_events if momentum_reference_events is not None else pd.DataFrame(),
+        momentum_threshold_pct=momentum_threshold_pct,
+        live_strategy_events=live_strategy_events,
+        live_strategy_state=live_strategy_state,
     )
 
     fig = go.Figure()
