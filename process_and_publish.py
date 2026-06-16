@@ -40,7 +40,7 @@ from core_utils import (
     upsert_in_chunks,
 )
 
-from strategy_1h import get_last_directional_reference, run_live_1h_strategy
+from strategy_1h import run_live_1h_strategy
 
 INPUT_FILE = Path("binance_data.json")
 STREAMLIT_APP_URL = os.getenv("STREAMLIT_APP_URL", "")
@@ -575,6 +575,25 @@ def fetch_active_manual_zones(supabase, pair: str) -> pd.DataFrame:
     )
 
 
+def fetch_live_1h_position_state(supabase, pair: str) -> Dict | None:
+    """Fetch the current live 1H strategy position state.
+
+    Counter momentum Telegram alerts must use the active strategy position as
+    their reference, not the latest official SMA/RSI signal reference.
+    """
+    resp = (
+        supabase
+        .table("strategy_1h_states")
+        .select("pair,status,direction,entry_time,trade_id,updated_at")
+        .eq("pair", pair)
+        .limit(1)
+        .execute()
+    )
+
+    data = resp.data or []
+    return data[0] if data else None
+
+
 def fetch_counter_momentum_state(
     supabase,
     *,
@@ -803,89 +822,11 @@ def run() -> None:
         notification_messages: List[str] = []
 
         # -------------------------------------------------
-        # Counter momentum early warning
-        # -------------------------------------------------
-        # Official 1H signal uses CLOSED 1H candles.
-        # Counter momentum uses the currently OPEN 1H candle, if Binance provides one.
-        if pd.Timestamp(open_1h_row["open_time"]) > pd.Timestamp(latest_closed_1h_row["open_time"]):
-            manual_zones = fetch_active_manual_zones(supabase, pair)
-
-            if manual_zones.empty:
-                log(f"  └─ Counter momentum skipped for {pair}: no active manual zones")
-            else:
-                reference = get_last_directional_reference(closed_1h_df)
-                reference_signal = normalize_signal(reference.get("signal"))
-                reference_signal_time = reference.get("signal_time")
-
-                df_1h_with_current_open = build_1h_with_current_open_df(
-                    closed_1h_df=closed_1h_df,
-                    open_1h_row=open_1h_row,
-                )
-
-                counter_event = evaluate_counter_momentum(
-                    pair=pair,
-                    reference_signal=reference_signal,
-                    reference_signal_time=reference_signal_time,
-                    open_1h_row=open_1h_row,
-                    df_1h_with_current_open=df_1h_with_current_open,
-                    zones=manual_zones,
-                    early_threshold_pct=COUNTER_MOMENTUM_EARLY_THRESHOLD,
-                    full_threshold_pct=COUNTER_MOMENTUM_FULL_THRESHOLD,
-                )
-
-                if counter_event.get("should_warn"):
-                    existing_counter_state = fetch_counter_momentum_state(
-                        supabase,
-                        pair=pair,
-                        candle_open_time=counter_event["candle_open_time"],
-                        reference_signal=counter_event["reference_signal"],
-                        counter_direction=counter_event["counter_direction"],
-                    )
-
-                    send_counter_warning = should_send_counter_momentum_warning(
-                        event=counter_event,
-                        existing_state=existing_counter_state,
-                        repeat_mode=COUNTER_MOMENTUM_REPEAT_MODE,
-                    )
-
-                    upsert_counter_momentum_state(
-                        supabase,
-                        event=counter_event,
-                        notified=send_counter_warning,
-                    )
-
-                    if send_counter_warning:
-                        notification_messages.append(
-                            build_counter_momentum_message(
-                                event=counter_event,
-                                streamlit_app_url=STREAMLIT_APP_URL,
-                            )
-                        )
-                        log(
-                            f"  └─ Counter momentum warning queued for {pair}: "
-                            f"{counter_event['ratio_pct']:.2f}% "
-                            f"({COUNTER_MOMENTUM_REPEAT_MODE})"
-                        )
-                    else:
-                        log(
-                            f"  └─ Counter momentum warning skipped for {pair}: "
-                            f"repeat_mode={COUNTER_MOMENTUM_REPEAT_MODE}, "
-                            f"ratio={counter_event['ratio_pct']:.2f}%"
-                        )
-                else:
-                    log(
-                        f"  └─ Counter momentum skipped for {pair}: "
-                        f"{format_counter_momentum_skip_reason(counter_event)}"
-                    )
-        else:
-            log(f"  └─ Counter momentum skipped for {pair}: no separate open 1h candle")
-
-        # -------------------------------------------------
         # Live 1H position strategy
         # -------------------------------------------------
-        # The engine processes each closed 1H candle only once, keeps the live
-        # position state in Supabase, updates dynamic Zone/SMA TP at candle open,
-        # and returns detailed Telegram event messages.
+        # Run the live position engine BEFORE counter-momentum checks.
+        # Counter alerts must use the updated active position after any newly
+        # closed 1H candle is processed.
         manual_zones_for_strategy = fetch_active_manual_zones(supabase, pair)
 
         if manual_zones_for_strategy.empty:
@@ -914,6 +855,93 @@ def run() -> None:
                     f"  └─ Live 1H strategy checked for {pair}: "
                     "no new position/TP event message"
                 )
+
+        # -------------------------------------------------
+        # Counter momentum early warning
+        # -------------------------------------------------
+        # Counter momentum uses the currently OPEN 1H candle, but the reference
+        # direction is the updated live 1H position direction.
+        # If there is no active OPEN position, no COUNTER alert is sent.
+        if pd.Timestamp(open_1h_row["open_time"]) > pd.Timestamp(latest_closed_1h_row["open_time"]):
+            if manual_zones_for_strategy.empty:
+                log(f"  └─ Counter momentum skipped for {pair}: no active manual zones")
+            else:
+                live_1h_state = fetch_live_1h_position_state(supabase, pair)
+                live_status = str((live_1h_state or {}).get("status") or "").upper()
+                reference_signal = normalize_signal((live_1h_state or {}).get("direction"))
+                reference_signal_time = (live_1h_state or {}).get("entry_time")
+
+                if live_status != "OPEN" or reference_signal not in {"LONG", "SHORT"}:
+                    log(
+                        f"  └─ Counter momentum skipped for {pair}: "
+                        f"no active OPEN 1H position "
+                        f"(status={live_status or 'NA'}, direction={reference_signal})"
+                    )
+                else:
+                    df_1h_with_current_open = build_1h_with_current_open_df(
+                        closed_1h_df=closed_1h_df,
+                        open_1h_row=open_1h_row,
+                    )
+
+                    counter_event = evaluate_counter_momentum(
+                        pair=pair,
+                        reference_signal=reference_signal,
+                        reference_signal_time=reference_signal_time,
+                        open_1h_row=open_1h_row,
+                        df_1h_with_current_open=df_1h_with_current_open,
+                        zones=manual_zones_for_strategy,
+                        early_threshold_pct=COUNTER_MOMENTUM_EARLY_THRESHOLD,
+                        full_threshold_pct=COUNTER_MOMENTUM_FULL_THRESHOLD,
+                    )
+
+                    if counter_event.get("should_warn"):
+                        existing_counter_state = fetch_counter_momentum_state(
+                            supabase,
+                            pair=pair,
+                            candle_open_time=counter_event["candle_open_time"],
+                            reference_signal=counter_event["reference_signal"],
+                            counter_direction=counter_event["counter_direction"],
+                        )
+
+                        send_counter_warning = should_send_counter_momentum_warning(
+                            event=counter_event,
+                            existing_state=existing_counter_state,
+                            repeat_mode=COUNTER_MOMENTUM_REPEAT_MODE,
+                        )
+
+                        upsert_counter_momentum_state(
+                            supabase,
+                            event=counter_event,
+                            notified=send_counter_warning,
+                        )
+
+                        if send_counter_warning:
+                            notification_messages.append(
+                                build_counter_momentum_message(
+                                    event=counter_event,
+                                    streamlit_app_url=STREAMLIT_APP_URL,
+                                )
+                            )
+                            log(
+                                f"  └─ Counter momentum warning queued for {pair}: "
+                                f"active_position={reference_signal}, "
+                                f"ratio={counter_event['ratio_pct']:.2f}% "
+                                f"({COUNTER_MOMENTUM_REPEAT_MODE})"
+                            )
+                        else:
+                            log(
+                                f"  └─ Counter momentum warning skipped for {pair}: "
+                                f"repeat_mode={COUNTER_MOMENTUM_REPEAT_MODE}, "
+                                f"active_position={reference_signal}, "
+                                f"ratio={counter_event['ratio_pct']:.2f}%"
+                            )
+                    else:
+                        log(
+                            f"  └─ Counter momentum skipped for {pair}: "
+                            f"{format_counter_momentum_skip_reason(counter_event)}"
+                        )
+        else:
+            log(f"  └─ Counter momentum skipped for {pair}: no separate open 1h candle")
 
         has_previous_snapshot = (
             prev_15m is not None
