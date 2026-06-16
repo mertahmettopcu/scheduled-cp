@@ -700,6 +700,109 @@ def add_signal_reference_state(
     return merged.sort_values("open_time").reset_index(drop=True)
 
 
+def add_live_position_reference_state(
+    chart_df: pd.DataFrame,
+    live_strategy_events: pd.DataFrame | None = None,
+    live_strategy_state: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    out = chart_df.copy()
+    out = out.drop(columns=["reference_signal"], errors="ignore")
+
+    if out.empty or "open_time" not in out.columns:
+        out["reference_signal"] = pd.NA
+        return out
+
+    out["open_time"] = pd.to_datetime(out["open_time"], errors="coerce", utc=True)
+    out = out.dropna(subset=["open_time"]).sort_values("open_time").reset_index(drop=True)
+
+    timeline_rows = []
+
+    if live_strategy_events is not None and not live_strategy_events.empty:
+        events = live_strategy_events.copy()
+
+        if "event_time" in events.columns:
+            events["event_time"] = _to_utc_datetime_series(events["event_time"])
+        else:
+            events["event_time"] = pd.NaT
+
+        if "created_at" in events.columns:
+            events["created_at"] = _to_utc_datetime_series(events["created_at"])
+            events["event_time"] = events["event_time"].fillna(events["created_at"])
+
+        events["event_type"] = events.get("event_type", pd.Series(index=events.index, dtype="object")).fillna("").astype(str)
+        events["direction"] = events.get("direction", pd.Series(index=events.index, dtype="object")).fillna("").astype(str).str.upper()
+
+        for _, event in events.dropna(subset=["event_time"]).iterrows():
+            event_type = str(event.get("event_type") or "").upper()
+            direction = str(event.get("direction") or "").upper()
+
+            if event_type == "POSITION_OPEN" and direction in {"LONG", "SHORT"}:
+                timeline_rows.append(
+                    {
+                        "event_time": event["event_time"],
+                        "reference_signal": direction,
+                        "event_order": 1,
+                    }
+                )
+            elif event_type in {"POSITION_CLOSE", "TP_HIT"}:
+                timeline_rows.append(
+                    {
+                        "event_time": event["event_time"],
+                        "reference_signal": pd.NA,
+                        "event_order": 0,
+                    }
+                )
+
+    if live_strategy_state is not None and not live_strategy_state.empty:
+        state_row = live_strategy_state.iloc[0]
+        status = str(state_row.get("status") or "").upper()
+        direction = str(state_row.get("direction") or "").upper()
+        entry_time = pd.to_datetime(state_row.get("entry_time"), errors="coerce", utc=True)
+
+        # PENDING_TP_DECISION means TP has already been hit and the strategy is waiting
+        # for the next closed-candle decision, so it should not be treated as an open position.
+        if status == "OPEN" and direction in {"LONG", "SHORT"} and pd.notna(entry_time):
+            timeline_rows.append(
+                {
+                    "event_time": entry_time,
+                    "reference_signal": direction,
+                    "event_order": 1,
+                }
+            )
+
+    if not timeline_rows:
+        out["reference_signal"] = pd.NA
+        return out
+
+    timeline = pd.DataFrame(timeline_rows)
+    timeline["event_time"] = pd.to_datetime(timeline["event_time"], errors="coerce", utc=True)
+    timeline = (
+        timeline
+        .dropna(subset=["event_time"])
+        .sort_values(["event_time", "event_order"])
+        .reset_index(drop=True)
+    )
+
+    if timeline.empty:
+        out["reference_signal"] = pd.NA
+        return out
+
+    merged = pd.merge_asof(
+        out,
+        timeline[["event_time", "reference_signal"]],
+        left_on="open_time",
+        right_on="event_time",
+        direction="backward",
+    )
+
+    return (
+        merged
+        .drop(columns=["event_time"], errors="ignore")
+        .sort_values("open_time")
+        .reset_index(drop=True)
+    )
+
+
 def add_momentum_highlights(
     fig: go.Figure,
     chart_df: pd.DataFrame,
@@ -707,12 +810,25 @@ def add_momentum_highlights(
     marker_df: pd.DataFrame,
     show_momentum: bool,
     momentum_threshold_pct: float = 35.0,
+    live_strategy_events: pd.DataFrame | None = None,
+    live_strategy_state: pd.DataFrame | None = None,
 ) -> go.Figure:
     if not show_momentum or chart_df.empty or zones is None or zones.empty:
         return fig
 
     work = chart_df.copy()
-    work = add_signal_reference_state(work, marker_df)
+
+    if live_strategy_events is not None or live_strategy_state is not None:
+        # Dashboard momentum shading uses the live 1H strategy position as reference.
+        # Official 1H signal markers remain optional visual references only.
+        work = add_live_position_reference_state(
+            work,
+            live_strategy_events=live_strategy_events,
+            live_strategy_state=live_strategy_state,
+        )
+    else:
+        # Backward-compatible fallback for charts that do not provide live strategy state.
+        work = add_signal_reference_state(work, marker_df)
 
     if work.empty:
         return fig
@@ -2742,6 +2858,8 @@ def make_price_ema_chart(
         marker_df=momentum_reference_events if momentum_reference_events is not None else pd.DataFrame(),
         show_momentum=show_momentum,
         momentum_threshold_pct=momentum_threshold_pct,
+        live_strategy_events=live_strategy_events,
+        live_strategy_state=live_strategy_state,
     )
 
     fig = add_live_strategy_trade_segments(
@@ -3130,6 +3248,7 @@ def make_1h_rsi_chart(
     momentum_threshold_pct: float = 35.0,
     momentum_reference_events: pd.DataFrame | None = None,
     live_strategy_events: pd.DataFrame | None = None,
+    live_strategy_state: pd.DataFrame | None = None,
     show_live_strategy: bool = False,
 ) -> go.Figure:
     plot_df = df.copy()
@@ -3158,6 +3277,8 @@ def make_1h_rsi_chart(
         marker_df=momentum_reference_events if momentum_reference_events is not None else pd.DataFrame(),
         show_momentum=show_momentum,
         momentum_threshold_pct=momentum_threshold_pct,
+        live_strategy_events=live_strategy_events,
+        live_strategy_state=live_strategy_state,
     )
 
     rsi_specs = (
@@ -3787,6 +3908,7 @@ st.plotly_chart(
         momentum_threshold_pct=momentum_threshold_pct,
         momentum_reference_events=hourly_signal_reference_events,
         live_strategy_events=strategy_1h_events,
+        live_strategy_state=strategy_1h_state,
         show_live_strategy=show_live_strategy_1h,
     ),
     use_container_width=True,
