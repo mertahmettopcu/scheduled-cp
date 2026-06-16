@@ -1086,9 +1086,29 @@ def run() -> None:
             notification_messages.append(neutral_message)
 
         if notification_messages:
-            for message in notification_messages:
-                send_telegram_message(message, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_IDS)
-            log(f"  └─ 📨 {len(notification_messages)} notification(s) sent for {pair}")
+            notification_stats = {"sent": 0, "skipped_duplicate": 0, "unknown": 0, "failed": 0}
+
+            for idx, message in enumerate(notification_messages, start=1):
+                stats = send_telegram_message(
+                    message,
+                    TELEGRAM_BOT_TOKEN,
+                    TELEGRAM_CHAT_IDS,
+                    supabase=supabase,
+                    notification_context={
+                        "pair": pair,
+                        "source": f"process_and_publish:{idx}/{len(notification_messages)}",
+                    },
+                )
+                for key in notification_stats:
+                    notification_stats[key] += int(stats.get(key, 0))
+
+            log(
+                f"  └─ 📨 {len(notification_messages)} notification message(s) processed for {pair}: "
+                f"sent={notification_stats['sent']}, "
+                f"skipped_duplicate={notification_stats['skipped_duplicate']}, "
+                f"unknown={notification_stats['unknown']}, "
+                f"failed={notification_stats['failed']}"
+            )
         else:
             log(f"  └─ Notification skipped for {pair} (no new event)")
 
