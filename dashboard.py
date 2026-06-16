@@ -1945,19 +1945,32 @@ def add_ichimoku_tp_segments(
             )
         )
 
-        # Invisible wider hover handle for the Ichimoku TP line.
-        fig.add_trace(
-            go.Scatter(
-                x=[x0_display, x1_display],
-                y=[tp_level, tp_level],
-                mode="lines",
-                line=dict(color="rgba(0,0,0,0)", width=14),
-                name="Ichimoku TP hover",
-                showlegend=False,
-                customdata=tp_hover_data,
-                hovertemplate=tp_hover_template,
+        # Invisible hover handles for the Ichimoku TP line.
+        # Plotly line hover is easiest to catch around actual trace points.
+        # A long TP line with only start/end points can show hover mainly near the first/last day,
+        # so we add transparent daily hover points across the whole visible segment.
+        tp_hover_points = work[
+            (work["open_time"] >= x0_time)
+            & (work["open_time"] <= x1_time)
+        ]["display_time"].tolist()
+
+        tp_hover_points.extend([x0_display, x1_display])
+        tp_hover_points = sorted(pd.Series(tp_hover_points).dropna().drop_duplicates().tolist())
+
+        if tp_hover_points:
+            fig.add_trace(
+                go.Scatter(
+                    x=tp_hover_points,
+                    y=[tp_level] * len(tp_hover_points),
+                    mode="lines+markers",
+                    line=dict(color="rgba(0,0,0,0)", width=18),
+                    marker=dict(size=18, color="rgba(0,0,0,0)", line=dict(width=0)),
+                    name="Ichimoku TP hover",
+                    showlegend=False,
+                    customdata=[tp_hover_data[0]] * len(tp_hover_points),
+                    hovertemplate=tp_hover_template,
+                )
             )
-        )
 
     return fig
     
