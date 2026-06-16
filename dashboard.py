@@ -1911,6 +1911,28 @@ def add_ichimoku_tp_segments(
         x0_display = pd.Timestamp(x0_time).tz_convert(DISPLAY_TZ)
         x1_display = pd.Timestamp(x1_time).tz_convert(DISPLAY_TZ)
 
+        tp_hover_data = [[
+            signal_type,
+            tp_level,
+            tp_status,
+            event.get("ichimoku_entry_ref"),
+            event.get("ichimoku_sl_level"),
+            event.get("ichimoku_rr"),
+        ]] * 2
+
+        tp_hover_template = (
+            "🟡 Ichimoku TP çizgisi<br>"
+            "Yön: %{customdata[0]}<br>"
+            "TP: %{customdata[1]:.2f}<br>"
+            "Status: %{customdata[2]}<br>"
+            "Entry ref: %{customdata[3]:.2f}<br>"
+            "SL: %{customdata[4]:.2f}<br>"
+            "RR: %{customdata[5]:.1f}R<br>"
+            "%{x}<extra></extra>"
+        )
+
+        # Visible TP line. Hover is handled by the transparent wider line below,
+        # so the thin visible line remains easy to see but easier to target.
         fig.add_trace(
             go.Scatter(
                 x=[x0_display, x1_display],
@@ -1919,14 +1941,21 @@ def add_ichimoku_tp_segments(
                 line=dict(color="#D4A000", width=3),
                 name="Ichimoku TP",
                 showlegend=False,
-                customdata=[[signal_type, tp_level, tp_status]],
-                hovertemplate=(
-                    "Ichimoku TP<br>"
-                    "Signal: %{customdata[0]}<br>"
-                    "TP level: %{customdata[1]:.2f}<br>"
-                    "Status: %{customdata[2]}<br>"
-                    "<extra></extra>"
-                ),
+                hoverinfo="skip",
+            )
+        )
+
+        # Invisible wider hover handle for the Ichimoku TP line.
+        fig.add_trace(
+            go.Scatter(
+                x=[x0_display, x1_display],
+                y=[tp_level, tp_level],
+                mode="lines",
+                line=dict(color="rgba(0,0,0,0)", width=14),
+                name="Ichimoku TP hover",
+                showlegend=False,
+                customdata=tp_hover_data,
+                hovertemplate=tp_hover_template,
             )
         )
 
@@ -2830,6 +2859,61 @@ def add_rsi_signal_markers(
     return fig
 
 
+def _build_rsi_hover_text(row: pd.Series) -> str:
+    return "<br>".join([
+        "📈 RSI",
+        f"Time: {_fmt_display_time(row.get('open_time')) or _clean_hover_value(row.get('display_time'))}",
+        f"RSI4: {_fmt_optional(row.get('rsi4'))}",
+        f"RSI14: {_fmt_optional(row.get('rsi14'))}",
+        f"RSI52: {_fmt_optional(row.get('rsi52'))}",
+    ])
+
+
+def add_rsi_line_hover_capture_layer(
+    fig: go.Figure,
+    chart_df: pd.DataFrame,
+    marker_size: int = 24,
+) -> go.Figure:
+    """Add transparent hover handles for RSI lines only.
+
+    This keeps the RSI panel easy to read: normal hover shows only Time + RSI4/14/52,
+    while strategy/event symbols keep their own hover cards when the user points directly
+    at the symbol.
+    """
+    if chart_df.empty or "display_time" not in chart_df.columns:
+        return fig
+
+    required = [col for col in ["rsi4", "rsi14", "rsi52"] if col in chart_df.columns]
+    if not required:
+        return fig
+
+    work = chart_df.copy()
+    work["rsi_hover_text"] = work.apply(_build_rsi_hover_text, axis=1)
+
+    for column in required:
+        layer = work.dropna(subset=[column]).copy()
+        if layer.empty:
+            continue
+        fig.add_trace(
+            go.Scatter(
+                x=layer["display_time"],
+                y=layer[column],
+                mode="markers",
+                name=f"{column.upper()} hover",
+                showlegend=False,
+                marker=dict(
+                    size=marker_size,
+                    color="rgba(0,0,0,0.01)",
+                    line=dict(width=0),
+                ),
+                customdata=layer["rsi_hover_text"],
+                hovertemplate="%{customdata}<extra></extra>",
+            )
+        )
+
+    return fig
+
+
 # 1H RSI panel shown directly under the 1H price chart.
 # RSI values are calculated in add_ema_rsi(); this function renders RSI4/RSI14/RSI52.
 # Signal arrows and momentum highlights are copied as visual references from the official 1H chart context.
@@ -3083,6 +3167,12 @@ def make_1h_rsi_chart(
                 hovertemplate=f"{name}: %{{y:.2f}}<extra></extra>",
             )
         )
+
+    fig = add_rsi_line_hover_capture_layer(
+        fig=fig,
+        chart_df=plot_df,
+        marker_size=24,
+    )
 
     for level in (20, 30, 50, 70, 80.5):
         fig.add_hline(
