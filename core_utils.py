@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import os
 import time
@@ -1428,40 +1430,303 @@ def get_previous_snapshot_map(supabase: Client, pair: str) -> Dict[str, Dict]:
     return {row["timeframe"]: row for row in rows}
 
 
-def send_telegram_message(text: str, bot_token: str, chat_ids: List[str]) -> None:
+TELEGRAM_NOTIFICATION_LOG_TABLE = "telegram_notification_log"
+TELEGRAM_SEND_TIMEOUT = 20
+
+
+def _truncate_for_log(value: object, limit: int = 1000) -> str | None:
+    if value is None:
+        return None
+    text = str(value)
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "…"
+
+
+def _telegram_message_hash(text: str) -> str:
+    return hashlib.sha256(str(text or "").encode("utf-8")).hexdigest()
+
+
+def _telegram_notification_key(*, chat_id: str, text: str) -> tuple[str, str]:
+    """
+    Stable per-chat message key.
+
+    Telegram sendMessage is not idempotent. If a POST times out after Telegram
+    already accepted the message, retrying the same POST creates duplicates.
+    This key lets us claim a message before sending it and suppress later
+    duplicate sends with the exact same text to the same chat.
+    """
+    message_sha = _telegram_message_hash(text)
+    key_source = f"telegram|{chat_id}|{message_sha}"
+    notification_key = hashlib.sha256(key_source.encode("utf-8")).hexdigest()
+    return notification_key, message_sha
+
+
+def _fetch_telegram_notification_log(supabase: Client, notification_key: str) -> Dict | None:
+    resp = (
+        supabase.table(TELEGRAM_NOTIFICATION_LOG_TABLE)
+        .select("*")
+        .eq("notification_key", notification_key)
+        .limit(1)
+        .execute()
+    )
+    rows = resp.data or []
+    return rows[0] if rows else None
+
+
+def _claim_telegram_notification(
+    *,
+    supabase: Client,
+    notification_key: str,
+    chat_id: str,
+    message_sha256: str,
+    text: str,
+    context: Dict | None,
+) -> tuple[bool, Dict | None]:
+    context = context or {}
+    payload = {
+        "notification_key": notification_key,
+        "channel": "telegram",
+        "chat_id": str(chat_id),
+        "pair": context.get("pair"),
+        "source": context.get("source"),
+        "message_sha256": message_sha256,
+        "message_preview": _truncate_for_log(text, 500),
+        "status": "CLAIMED",
+        "attempt_count": 0,
+        "created_at": _now_iso(),
+        "updated_at": _now_iso(),
+    }
+
+    try:
+        resp = supabase.table(TELEGRAM_NOTIFICATION_LOG_TABLE).insert(payload).execute()
+        rows = resp.data or []
+        return True, rows[0] if rows else payload
+    except Exception as exc:
+        try:
+            existing = _fetch_telegram_notification_log(supabase, notification_key)
+        except Exception:
+            raise RuntimeError(
+                f"Telegram notification claim failed and existing row could not be checked. "
+                f"notification_key={notification_key[:12]}, error={type(exc).__name__}: {exc}"
+            ) from exc
+
+        if existing is None:
+            raise RuntimeError(
+                f"Telegram notification claim failed, but no duplicate row exists. "
+                f"notification_key={notification_key[:12]}, error={type(exc).__name__}: {exc}"
+            ) from exc
+
+        log(
+            "Telegram duplicate suppressed "
+            f"key={notification_key[:12]} "
+            f"status={existing.get('status')} "
+            f"sent_at={existing.get('sent_at')} "
+            f"last_error_type={existing.get('last_error_type')} "
+            f"last_error_message={_truncate_for_log(existing.get('last_error_message'), 160)}"
+        )
+        return False, existing
+
+
+def _update_telegram_notification_log(
+    *,
+    supabase: Client,
+    notification_key: str,
+    updates: Dict,
+) -> None:
+    payload = dict(updates)
+    payload["updated_at"] = _now_iso()
+    try:
+        (
+            supabase.table(TELEGRAM_NOTIFICATION_LOG_TABLE)
+            .update(payload)
+            .eq("notification_key", notification_key)
+            .execute()
+        )
+    except Exception as exc:
+        log(
+            f"WARNING: Telegram notification log update failed "
+            f"key={notification_key[:12]}: {type(exc).__name__}: {exc}"
+        )
+
+
+def send_telegram_message(
+    text: str,
+    bot_token: str,
+    chat_ids: List[str],
+    supabase: Client | None = None,
+    notification_context: Dict | None = None,
+) -> Dict[str, int]:
+    """
+    Send a Telegram message with optional Supabase-backed de-duplication.
+
+    Important behavior:
+    - With Supabase, the message is claimed BEFORE the Telegram POST.
+    - We do not retry ambiguous request/timeout failures. A timeout may mean
+      Telegram accepted the message but the runner did not receive the 200 OK.
+      Retrying that POST is exactly what caused duplicate messages.
+    - Failures are written to telegram_notification_log with exception type,
+      HTTP status and response body when available.
+    """
+    result = {"sent": 0, "skipped_duplicate": 0, "unknown": 0, "failed": 0}
+
     if not bot_token or not chat_ids:
         log("Notification credentials missing, skipping Telegram send.")
-        return
+        return result
 
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
 
     for chat_id in chat_ids:
         payload = {"chat_id": chat_id, "text": text}
-
-        last_exc = None
-        delay = 1.0
         masked_chat = f"...{str(chat_id)[-4:]}" if chat_id else "unknown"
+        notification_key = None
 
-        for attempt in range(1, 5):
-            try:
-                r = requests.post(url, json=payload, timeout=20)
-                r.raise_for_status()
-                log(f"Notification sent to {masked_chat}")
-                last_exc = None
-                break
-            except requests.RequestException as exc:
-                last_exc = exc
-                if attempt == 4:
-                    break
+        if supabase is not None:
+            notification_key, message_sha256 = _telegram_notification_key(
+                chat_id=str(chat_id),
+                text=text,
+            )
+            claimed, _existing = _claim_telegram_notification(
+                supabase=supabase,
+                notification_key=notification_key,
+                chat_id=str(chat_id),
+                message_sha256=message_sha256,
+                text=text,
+                context=notification_context,
+            )
+            if not claimed:
+                result["skipped_duplicate"] += 1
+                continue
+
+            _update_telegram_notification_log(
+                supabase=supabase,
+                notification_key=notification_key,
+                updates={
+                    "status": "SENDING",
+                    "attempt_count": 1,
+                    "first_attempt_at": _now_iso(),
+                    "last_attempt_at": _now_iso(),
+                },
+            )
+
+        try:
+            r = requests.post(url, json=payload, timeout=TELEGRAM_SEND_TIMEOUT)
+            response_text = _truncate_for_log(r.text, 1000)
+
+            if not r.ok:
+                if supabase is not None and notification_key is not None:
+                    _update_telegram_notification_log(
+                        supabase=supabase,
+                        notification_key=notification_key,
+                        updates={
+                            "status": "FAILED_HTTP",
+                            "last_http_status": int(r.status_code),
+                            "last_response_body": response_text,
+                            "last_error_type": "HTTPError",
+                            "last_error_message": response_text,
+                        },
+                    )
                 log(
-                    f"[Retry] notification send failed for {masked_chat} "
-                    f"on attempt {attempt}/4. Retrying in {delay:.1f}s..."
+                    f"Telegram send failed for {masked_chat} "
+                    f"http_status={r.status_code} body={_truncate_for_log(response_text, 180)}"
                 )
-                time.sleep(delay)
-                delay = min(delay * 2, 8.0)
+                result["failed"] += 1
+                continue
 
-        if last_exc is not None:
-            raise RuntimeError(f"Notification send failed after 4 attempts for {masked_chat}")
+            try:
+                body = r.json()
+            except ValueError:
+                body = {}
+
+            if body and body.get("ok") is False:
+                body_text = _truncate_for_log(json.dumps(body, ensure_ascii=False), 1000)
+                if supabase is not None and notification_key is not None:
+                    _update_telegram_notification_log(
+                        supabase=supabase,
+                        notification_key=notification_key,
+                        updates={
+                            "status": "FAILED_HTTP",
+                            "last_http_status": int(r.status_code),
+                            "last_response_body": body_text,
+                            "last_error_type": "TelegramApiError",
+                            "last_error_message": body_text,
+                        },
+                    )
+                log(
+                    f"Telegram API returned ok=false for {masked_chat}: "
+                    f"{_truncate_for_log(body_text, 180)}"
+                )
+                result["failed"] += 1
+                continue
+
+            telegram_message_id = None
+            if isinstance(body, dict):
+                telegram_message_id = (body.get("result") or {}).get("message_id")
+
+            if supabase is not None and notification_key is not None:
+                _update_telegram_notification_log(
+                    supabase=supabase,
+                    notification_key=notification_key,
+                    updates={
+                        "status": "SENT",
+                        "sent_at": _now_iso(),
+                        "telegram_message_id": telegram_message_id,
+                        "last_http_status": int(r.status_code),
+                        "last_response_body": _truncate_for_log(response_text, 1000),
+                        "last_error_type": None,
+                        "last_error_message": None,
+                    },
+                )
+
+            log(
+                f"Notification sent to {masked_chat} "
+                f"key={(notification_key or 'no-dedupe')[:12]} "
+                f"telegram_message_id={telegram_message_id}"
+            )
+            result["sent"] += 1
+
+        except requests.RequestException as exc:
+            # Ambiguous outcome: Telegram may have accepted the message but the
+            # runner did not receive the response. Do not retry this POST.
+            if supabase is not None and notification_key is not None:
+                _update_telegram_notification_log(
+                    supabase=supabase,
+                    notification_key=notification_key,
+                    updates={
+                        "status": "UNKNOWN_AFTER_EXCEPTION",
+                        "last_error_type": type(exc).__name__,
+                        "last_error_message": _truncate_for_log(str(exc), 1000),
+                    },
+                )
+            log(
+                f"Telegram send outcome unknown for {masked_chat} "
+                f"key={(notification_key or 'no-dedupe')[:12]} "
+                f"error_type={type(exc).__name__} "
+                f"error={_truncate_for_log(str(exc), 220)}. "
+                "No retry was attempted to avoid duplicate messages."
+            )
+            result["unknown"] += 1
+
+        except Exception as exc:
+            if supabase is not None and notification_key is not None:
+                _update_telegram_notification_log(
+                    supabase=supabase,
+                    notification_key=notification_key,
+                    updates={
+                        "status": "FAILED_EXCEPTION",
+                        "last_error_type": type(exc).__name__,
+                        "last_error_message": _truncate_for_log(str(exc), 1000),
+                    },
+                )
+            log(
+                f"Telegram send failed for {masked_chat} "
+                f"key={(notification_key or 'no-dedupe')[:12]} "
+                f"error_type={type(exc).__name__} "
+                f"error={_truncate_for_log(str(exc), 220)}"
+            )
+            result["failed"] += 1
+
+    return result
 
 
 def _safe_float(v):
