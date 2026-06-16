@@ -2242,6 +2242,8 @@ def add_ichimoku_tp_segments(
 def add_counter_momentum_hover_context(
     chart_df: pd.DataFrame,
     counter_momentum_states: pd.DataFrame | None,
+    live_strategy_events: pd.DataFrame | None = None,
+    live_strategy_state: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     out = chart_df.copy()
 
@@ -2347,6 +2349,40 @@ def add_counter_momentum_hover_context(
             merged = merged.drop(columns=[state_col])
 
     merged = merged.drop(columns=["candle_open_time"], errors="ignore")
+
+    # Validate intrabar CM rows against the live 1H strategy position reference.
+    # Old pipeline rows may have used the latest official SMA/RSI signal as Ref.
+    # The dashboard must show COUNTER only when it is against the active position.
+    if live_strategy_events is not None or live_strategy_state is not None:
+        ref_work = add_live_position_reference_state(
+            out[["open_time"]].copy(),
+            live_strategy_events=live_strategy_events,
+            live_strategy_state=live_strategy_state,
+        )
+
+        if not ref_work.empty and "reference_signal" in ref_work.columns:
+            ref_work = ref_work[["open_time", "reference_signal"]].rename(
+                columns={"reference_signal": "live_position_reference_signal"}
+            )
+            ref_work["open_time"] = pd.to_datetime(ref_work["open_time"], errors="coerce", utc=True)
+
+            merged = merged.merge(ref_work, on="open_time", how="left")
+
+            live_ref = merged["live_position_reference_signal"].fillna("").astype(str).str.upper()
+            cm_ref = merged["cm_reference_signal_text"].fillna("").astype(str).str.upper()
+            cm_counter = merged["cm_counter_direction_text"].fillna("").astype(str).str.upper()
+            cm_status = merged["cm_status_text"].fillna("no pipeline warning").astype(str)
+
+            expected_counter = live_ref.map({"LONG": "SHORT", "SHORT": "LONG"}).fillna("")
+            has_warning = ~cm_status.isin(["no pipeline warning", "NA", "", "nan", "None"])
+            valid_active_counter = (cm_ref == live_ref) & (cm_counter == expected_counter)
+            invalid_warning = has_warning & ~valid_active_counter
+
+            if invalid_warning.any():
+                for col, value in default_values.items():
+                    merged.loc[invalid_warning, col] = value
+
+            merged = merged.drop(columns=["live_position_reference_signal"], errors="ignore")
 
     return merged
 
@@ -2935,6 +2971,8 @@ def make_price_ema_chart(
     plot_df = add_counter_momentum_hover_context(
         chart_df=plot_df,
         counter_momentum_states=counter_momentum_states,
+        live_strategy_events=live_strategy_events,
+        live_strategy_state=live_strategy_state,
     )
     plot_df = add_final_counter_momentum_hover_context(
         chart_df=plot_df,
