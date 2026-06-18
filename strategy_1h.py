@@ -174,6 +174,30 @@ def in_zone_buffer(price: float, zone: float) -> bool:
     return float(zone) - ZONE_BUFFER <= float(price) <= float(zone) + ZONE_BUFFER
 
 
+def target_zone_buffer_touched(row: pd.Series, target_zone: float, direction: str) -> bool:
+    """Return True only if the candle actually touched the old target-zone buffer.
+
+    This gates same-direction momentum target shifting after TP. Momentum alone
+    can open a same-direction continuation, but it cannot advance the target to
+    the next zone unless the old target-zone buffer has actually been touched.
+    """
+    if target_zone is None or pd.isna(target_zone):
+        return False
+
+    direction = normalize_signal(direction)
+    trigger = zone_tp_trigger(float(target_zone), direction)
+
+    if direction == "LONG":
+        high = _safe_float(row.get("high"))
+        return high is not None and high >= trigger
+
+    if direction == "SHORT":
+        low = _safe_float(row.get("low"))
+        return low is not None and low <= trigger
+
+    return False
+
+
 def momentum_details(row: pd.Series, direction: str, zones: pd.DataFrame) -> Dict:
     context = zone_context(float(row["open"]), zones, direction)
     if context is None:
@@ -819,6 +843,7 @@ def _post_tp_decision(
         return state, messages
 
     if same_momentum["is_momentum"]:
+        zone_completed_for_shift = target_zone_buffer_touched(row, old_target, direction)
         state, msg = _open_position(
             supabase=supabase,
             state=state,
@@ -828,7 +853,7 @@ def _post_tp_decision(
             entry_price=float(row["close"]),
             reason="TP_AFTER_SAME_DIRECTION_MOMENTUM",
             zones=zones,
-            shifted_from_target=old_target,
+            shifted_from_target=old_target if zone_completed_for_shift else None,
         )
         if msg:
             messages.append(msg)
