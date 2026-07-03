@@ -3189,9 +3189,9 @@ def _build_rsi_hover_text(row: pd.Series) -> str:
     return "<br>".join([
         "📈 RSI",
         f"Time: {_fmt_display_time(row.get('open_time')) or _clean_hover_value(row.get('display_time'))}",
-        f"<span style="color:#f1c40f;font-weight:700;">━━</span> RSI4: {_fmt_optional(row.get('rsi4'))}",
-        f"<span style="color:#9b59b6;font-weight:700;">━━</span> RSI14: {_fmt_optional(row.get('rsi14'))}",
-        f"<span style="color:#e74c3c;font-weight:700;">━━</span> RSI52: {_fmt_optional(row.get('rsi52'))}",
+        f'<span style="color:#f1c40f;font-weight:700;">━━</span> RSI4: {_fmt_optional(row.get("rsi4"))}',
+        f'<span style="color:#9b59b6;font-weight:700;">━━</span> RSI14: {_fmt_optional(row.get("rsi14"))}',
+        f'<span style="color:#e74c3c;font-weight:700;">━━</span> RSI52: {_fmt_optional(row.get("rsi52"))}',
     ])
 
 
