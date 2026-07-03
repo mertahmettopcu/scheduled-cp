@@ -806,6 +806,55 @@ def _mark_tp_pending(
     return state, message
 
 
+def _reset_pending_after_blocked_post_tp_entry(
+    *,
+    supabase,
+    state: Dict,
+    row: pd.Series,
+    attempted_direction: str,
+    entry_reason: str,
+    official_signal: str,
+) -> bool:
+    """Clear stale TP-pending state when a post-TP entry attempt is blocked.
+
+    _open_position keeps the incoming state unchanged when zone context is
+    unavailable. During post-TP decision flow the incoming state is already
+    PENDING_TP_DECISION, so a blocked entry must be finalized explicitly;
+    otherwise later candles cannot fall back to the normal FLAT signal flow.
+    """
+    if state.get("status") != "PENDING_TP_DECISION":
+        return False
+
+    closed_direction = normalize_signal(state.get("pending_closed_direction"))
+    old_target = state.get("pending_old_target_zone")
+    rsi4 = _safe_float(row.get("rsi4"))
+
+    append_event(
+        supabase,
+        {
+            "pair": state["pair"],
+            "event_type": "WAIT",
+            "event_time": _iso(row["close_time"]),
+            "direction": closed_direction if closed_direction in {"LONG", "SHORT"} else None,
+            "price": float(row["close"]),
+            "reason": "TP_AFTER_ENTRY_BLOCKED_FLAT_RESET",
+            "target_zone": old_target,
+            "details": {
+                "blocked_entry_reason": entry_reason,
+                "attempted_direction": normalize_signal(attempted_direction),
+                "closed_direction": closed_direction,
+                "old_target_zone": old_target,
+                "official_signal": official_signal,
+                "rsi4": rsi4,
+                "note": "Post-TP entry was blocked, so pending TP decision was cleared and state returned to FLAT.",
+            },
+        },
+    )
+    _clear_pending_fields(state)
+    state["status"] = "FLAT"
+    return True
+
+
 def _post_tp_decision(
     *,
     supabase,
@@ -840,6 +889,14 @@ def _post_tp_decision(
         )
         if msg:
             messages.append(msg)
+        _reset_pending_after_blocked_post_tp_entry(
+            supabase=supabase,
+            state=state,
+            row=row,
+            attempted_direction=direction,
+            entry_reason="TP_AFTER_TARGET_BUFFER_CLOSE",
+            official_signal=official_signal,
+        )
         return state, messages
 
     if same_momentum["is_momentum"]:
@@ -857,6 +914,14 @@ def _post_tp_decision(
         )
         if msg:
             messages.append(msg)
+        _reset_pending_after_blocked_post_tp_entry(
+            supabase=supabase,
+            state=state,
+            row=row,
+            attempted_direction=direction,
+            entry_reason="TP_AFTER_SAME_DIRECTION_MOMENTUM",
+            official_signal=official_signal,
+        )
         return state, messages
 
     rsi4 = _safe_float(row.get("rsi4"))
@@ -873,6 +938,14 @@ def _post_tp_decision(
         )
         if msg:
             messages.append(msg)
+        _reset_pending_after_blocked_post_tp_entry(
+            supabase=supabase,
+            state=state,
+            row=row,
+            attempted_direction="SHORT",
+            entry_reason="TP_AFTER_RSI4_LONG_TO_SHORT",
+            official_signal=official_signal,
+        )
         return state, messages
 
     if direction == "SHORT" and rsi4 is not None and rsi4 <= TP_AFTER_SHORT_RSI4_MAX:
@@ -888,6 +961,14 @@ def _post_tp_decision(
         )
         if msg:
             messages.append(msg)
+        _reset_pending_after_blocked_post_tp_entry(
+            supabase=supabase,
+            state=state,
+            row=row,
+            attempted_direction="LONG",
+            entry_reason="TP_AFTER_RSI4_SHORT_TO_LONG",
+            official_signal=official_signal,
+        )
         return state, messages
 
     if official_signal in {"LONG", "SHORT"}:
@@ -903,6 +984,14 @@ def _post_tp_decision(
         )
         if msg:
             messages.append(msg)
+        _reset_pending_after_blocked_post_tp_entry(
+            supabase=supabase,
+            state=state,
+            row=row,
+            attempted_direction=official_signal,
+            entry_reason="TP_AFTER_OFFICIAL_SIGNAL",
+            official_signal=official_signal,
+        )
         return state, messages
 
     append_event(
