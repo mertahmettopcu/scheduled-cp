@@ -713,6 +713,7 @@ def _configure_tp_for_candle(
             pair=state["pair"],
             direction=state["direction"],
             candle_time=candle_row["open_time"],
+            current_price=float(candle_row["close"]),
             previous_source=old_source,
             previous_trigger=old_trigger,
             source=tp["source"],
@@ -814,7 +815,7 @@ def _reset_pending_after_blocked_post_tp_entry(
     attempted_direction: str,
     entry_reason: str,
     official_signal: str,
-) -> bool:
+) -> Optional[str]:
     """Clear stale TP-pending state when a post-TP entry attempt is blocked.
 
     _open_position keeps the incoming state unchanged when zone context is
@@ -823,9 +824,10 @@ def _reset_pending_after_blocked_post_tp_entry(
     otherwise later candles cannot fall back to the normal FLAT signal flow.
     """
     if state.get("status") != "PENDING_TP_DECISION":
-        return False
+        return None
 
     closed_direction = normalize_signal(state.get("pending_closed_direction"))
+    attempted_direction = normalize_signal(attempted_direction)
     old_target = state.get("pending_old_target_zone")
     rsi4 = _safe_float(row.get("rsi4"))
 
@@ -841,7 +843,7 @@ def _reset_pending_after_blocked_post_tp_entry(
             "target_zone": old_target,
             "details": {
                 "blocked_entry_reason": entry_reason,
-                "attempted_direction": normalize_signal(attempted_direction),
+                "attempted_direction": attempted_direction,
                 "closed_direction": closed_direction,
                 "old_target_zone": old_target,
                 "official_signal": official_signal,
@@ -850,9 +852,21 @@ def _reset_pending_after_blocked_post_tp_entry(
             },
         },
     )
+
+    message = build_wait_message(
+        pair=state["pair"],
+        candle_time=row["close_time"],
+        price=float(row["close"]),
+        reason="Post-TP entry blocked: zone context unavailable",
+        rsi4=rsi4,
+        official_signal=official_signal,
+        closed_direction=closed_direction,
+        attempted_direction=attempted_direction,
+    )
+
     _clear_pending_fields(state)
     state["status"] = "FLAT"
-    return True
+    return message
 
 
 def _post_tp_decision(
@@ -887,9 +901,7 @@ def _post_tp_decision(
             zones=zones,
             shifted_from_target=old_target,
         )
-        if msg:
-            messages.append(msg)
-        _reset_pending_after_blocked_post_tp_entry(
+        blocked_msg = _reset_pending_after_blocked_post_tp_entry(
             supabase=supabase,
             state=state,
             row=row,
@@ -897,6 +909,10 @@ def _post_tp_decision(
             entry_reason="TP_AFTER_TARGET_BUFFER_CLOSE",
             official_signal=official_signal,
         )
+        if blocked_msg:
+            messages.append(blocked_msg)
+        elif msg:
+            messages.append(msg)
         return state, messages
 
     if same_momentum["is_momentum"]:
@@ -912,9 +928,7 @@ def _post_tp_decision(
             zones=zones,
             shifted_from_target=old_target if zone_completed_for_shift else None,
         )
-        if msg:
-            messages.append(msg)
-        _reset_pending_after_blocked_post_tp_entry(
+        blocked_msg = _reset_pending_after_blocked_post_tp_entry(
             supabase=supabase,
             state=state,
             row=row,
@@ -922,6 +936,10 @@ def _post_tp_decision(
             entry_reason="TP_AFTER_SAME_DIRECTION_MOMENTUM",
             official_signal=official_signal,
         )
+        if blocked_msg:
+            messages.append(blocked_msg)
+        elif msg:
+            messages.append(msg)
         return state, messages
 
     rsi4 = _safe_float(row.get("rsi4"))
@@ -936,9 +954,7 @@ def _post_tp_decision(
             reason="TP_AFTER_RSI4_LONG_TO_SHORT",
             zones=zones,
         )
-        if msg:
-            messages.append(msg)
-        _reset_pending_after_blocked_post_tp_entry(
+        blocked_msg = _reset_pending_after_blocked_post_tp_entry(
             supabase=supabase,
             state=state,
             row=row,
@@ -946,6 +962,10 @@ def _post_tp_decision(
             entry_reason="TP_AFTER_RSI4_LONG_TO_SHORT",
             official_signal=official_signal,
         )
+        if blocked_msg:
+            messages.append(blocked_msg)
+        elif msg:
+            messages.append(msg)
         return state, messages
 
     if direction == "SHORT" and rsi4 is not None and rsi4 <= TP_AFTER_SHORT_RSI4_MAX:
@@ -959,9 +979,7 @@ def _post_tp_decision(
             reason="TP_AFTER_RSI4_SHORT_TO_LONG",
             zones=zones,
         )
-        if msg:
-            messages.append(msg)
-        _reset_pending_after_blocked_post_tp_entry(
+        blocked_msg = _reset_pending_after_blocked_post_tp_entry(
             supabase=supabase,
             state=state,
             row=row,
@@ -969,6 +987,10 @@ def _post_tp_decision(
             entry_reason="TP_AFTER_RSI4_SHORT_TO_LONG",
             official_signal=official_signal,
         )
+        if blocked_msg:
+            messages.append(blocked_msg)
+        elif msg:
+            messages.append(msg)
         return state, messages
 
     if official_signal in {"LONG", "SHORT"}:
@@ -982,9 +1004,7 @@ def _post_tp_decision(
             reason="TP_AFTER_OFFICIAL_SIGNAL",
             zones=zones,
         )
-        if msg:
-            messages.append(msg)
-        _reset_pending_after_blocked_post_tp_entry(
+        blocked_msg = _reset_pending_after_blocked_post_tp_entry(
             supabase=supabase,
             state=state,
             row=row,
@@ -992,6 +1012,10 @@ def _post_tp_decision(
             entry_reason="TP_AFTER_OFFICIAL_SIGNAL",
             official_signal=official_signal,
         )
+        if blocked_msg:
+            messages.append(blocked_msg)
+        elif msg:
+            messages.append(msg)
         return state, messages
 
     append_event(
@@ -1000,6 +1024,7 @@ def _post_tp_decision(
             "pair": state["pair"],
             "event_type": "WAIT",
             "event_time": _iso(row["close_time"]),
+            "price": float(row["close"]),
             "reason": "TP_AFTER_NO_BUFFER_MOMENTUM_RSI_OR_SIGNAL",
             "details": {
                 "closed_direction": direction,
@@ -1014,6 +1039,7 @@ def _post_tp_decision(
         build_wait_message(
             pair=state["pair"],
             candle_time=row["close_time"],
+            price=float(row["close"]),
             reason="TP completed, but buffer close, momentum, RSI4 and official signal did not open a new position",
             rsi4=rsi4,
             official_signal=official_signal,
@@ -1612,6 +1638,7 @@ def build_tp_update_message(
     pair: str,
     direction: str,
     candle_time,
+    current_price: float,
     previous_source,
     previous_trigger,
     source: str,
@@ -1625,6 +1652,7 @@ def build_tp_update_message(
     return "\n".join(
         [
             f"🟡 {pair} 1H TP SET {direction}",
+            f"Price: {format_price(current_price)}",
             f"TP: {source} @ {format_price(trigger)}",
             f"Target: {format_price(target_zone)}",
             f"Reason: {_reason_description(reason)}",
@@ -1690,16 +1718,29 @@ def build_wait_message(
     reason: str,
     rsi4: Optional[float],
     official_signal: str,
+    price: Optional[float] = None,
+    closed_direction: Optional[str] = None,
+    attempted_direction: Optional[str] = None,
 ) -> str:
-    return "\n".join(
+    lines = [f"⚪ {pair} 1H WAIT"]
+
+    if price is not None:
+        lines.append(f"Price: {format_price(price)}")
+
+    lines.append(f"Reason: {reason}")
+
+    if closed_direction and attempted_direction:
+        lines.append(f"Closed/Attempted: {closed_direction} → {attempted_direction}")
+
+    lines.extend(
         [
-            f"⚪ {pair} 1H WAIT",
-            f"Reason: {reason}",
             f"RSI4: {'NA' if rsi4 is None else f'{rsi4:.2f}'}",
             f"Signal: {official_signal}",
             f"Time TR: {_display_time_tr(candle_time)}",
         ]
     )
+
+    return "\n".join(lines)
 
 
 def build_zone_unavailable_message(pair: str, direction: str, price: float, action: str) -> str:
