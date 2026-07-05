@@ -3948,12 +3948,19 @@ else:
     live_status = str(live_state.get("status") or "NA").upper()
     live_direction = str(live_state.get("direction") or "NA").upper()
 
-    state_cols = st.columns(5)
+    latest_price = pd.NA
+    if not hourly.empty and "close" in hourly.columns:
+        latest_close_series = pd.to_numeric(hourly["close"], errors="coerce").dropna()
+        if not latest_close_series.empty:
+            latest_price = latest_close_series.iloc[-1]
+
+    state_cols = st.columns(6)
     state_cols[0].metric("Status", live_status)
     state_cols[1].metric("Direction", live_direction)
-    state_cols[2].metric("Entry", format(float(live_state["entry_price"]), ".2f") if pd.notna(live_state.get("entry_price")) else "NA")
-    state_cols[3].metric("Target zone", format(float(live_state["target_zone"]), ".2f") if pd.notna(live_state.get("target_zone")) else "NA")
-    state_cols[4].metric("TP", format(float(live_state["tp_trigger"]), ".2f") if pd.notna(live_state.get("tp_trigger")) else "NA")
+    state_cols[2].metric("Price", format(float(latest_price), ".2f") if pd.notna(latest_price) else "NA")
+    state_cols[3].metric("Entry", format(float(live_state["entry_price"]), ".2f") if pd.notna(live_state.get("entry_price")) else "NA")
+    state_cols[4].metric("Target zone", format(float(live_state["target_zone"]), ".2f") if pd.notna(live_state.get("target_zone")) else "NA")
+    state_cols[5].metric("TP", format(float(live_state["tp_trigger"]), ".2f") if pd.notna(live_state.get("tp_trigger")) else "NA")
 
     state_detail_cols = st.columns(4)
     state_detail_cols[0].caption(f"Entry reason: {live_state.get('entry_reason') or 'NA'}")
