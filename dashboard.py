@@ -3954,10 +3954,57 @@ else:
         if not latest_close_series.empty:
             latest_price = latest_close_series.iloc[-1]
 
+    price_bg = "rgba(120, 120, 120, 0.08)"
+    price_shadow = "0 0 0 1px rgba(120, 120, 120, 0.18)"
+    price_border = "rgba(120, 120, 120, 0.22)"
+
+    entry_price_for_color = pd.to_numeric(pd.Series([live_state.get("entry_price")]), errors="coerce").iloc[0]
+
+    if (
+        live_status == "OPEN"
+        and live_direction in {"LONG", "SHORT"}
+        and pd.notna(latest_price)
+        and pd.notna(entry_price_for_color)
+    ):
+        price_value = float(latest_price)
+        entry_value = float(entry_price_for_color)
+
+        if (
+            (live_direction == "LONG" and price_value > entry_value)
+            or (live_direction == "SHORT" and price_value < entry_value)
+        ):
+            price_bg = "rgba(46, 204, 113, 0.18)"
+            price_shadow = "0 0 0 1px rgba(46, 204, 113, 0.34), 0 0 18px rgba(46, 204, 113, 0.30)"
+            price_border = "rgba(46, 204, 113, 0.38)"
+        elif (
+            (live_direction == "LONG" and price_value < entry_value)
+            or (live_direction == "SHORT" and price_value > entry_value)
+        ):
+            price_bg = "rgba(231, 76, 60, 0.18)"
+            price_shadow = "0 0 0 1px rgba(231, 76, 60, 0.34), 0 0 18px rgba(231, 76, 60, 0.30)"
+            price_border = "rgba(231, 76, 60, 0.38)"
+
+    price_display = format(float(latest_price), ".2f") if pd.notna(latest_price) else "NA"
+
     state_cols = st.columns(6)
     state_cols[0].metric("Status", live_status)
     state_cols[1].metric("Direction", live_direction)
-    state_cols[2].metric("Price", format(float(latest_price), ".2f") if pd.notna(latest_price) else "NA")
+    with state_cols[2]:
+        st.markdown(
+            f"""
+<div style="
+    border: 1px solid {price_border};
+    border-radius: 0.55rem;
+    padding: 0.42rem 0.75rem 0.52rem 0.75rem;
+    background: {price_bg};
+    box-shadow: {price_shadow};
+">
+  <div style="font-size: 0.875rem; opacity: 0.72; line-height: 1.25;">Price</div>
+  <div style="font-size: 2rem; font-weight: 600; line-height: 1.22; margin-top: 0.08rem;">{price_display}</div>
+</div>
+            """,
+            unsafe_allow_html=True,
+        )
     state_cols[3].metric("Entry", format(float(live_state["entry_price"]), ".2f") if pd.notna(live_state.get("entry_price")) else "NA")
     state_cols[4].metric("Target zone", format(float(live_state["target_zone"]), ".2f") if pd.notna(live_state.get("target_zone")) else "NA")
     state_cols[5].metric("TP", format(float(live_state["tp_trigger"]), ".2f") if pd.notna(live_state.get("tp_trigger")) else "NA")
