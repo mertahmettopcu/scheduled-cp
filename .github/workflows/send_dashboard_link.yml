@@ -35,20 +35,7 @@ jobs:
               -d "text=${TEXT}" \
               -d "disable_web_page_preview=true")"
 
-            MESSAGE_ID="$(RESPONSE="$RESPONSE" python - <<'PY'
-import json
-import os
-import sys
-
-data = json.loads(os.environ["RESPONSE"])
-
-if not data.get("ok"):
-    print(data, file=sys.stderr)
-    sys.exit(1)
-
-print(data["result"]["message_id"])
-PY
-)"
+            MESSAGE_ID="$(RESPONSE="$RESPONSE" python3 -c 'import json, os, sys; data=json.loads(os.environ["RESPONSE"]); print(data["result"]["message_id"]) if data.get("ok") else (print(data, file=sys.stderr), sys.exit(1))')"
 
             echo "Pinning message_id: $MESSAGE_ID"
 
