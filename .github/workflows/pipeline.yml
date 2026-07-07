@@ -28,8 +28,22 @@ jobs:
 
       - name: Install tunnel client
         run: |
+          set -euo pipefail
+
+          if command -v openvpn >/dev/null 2>&1; then
+            openvpn --version
+            exit 0
+          fi
+
+          sudo mkdir -p /tmp/disabled-apt-sources
+
+          sudo grep -RIl "packages.microsoft.com" /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null | while read -r file; do
+            echo "Disabling broken apt source: $file"
+            sudo mv "$file" "/tmp/disabled-apt-sources/$(basename "$file").disabled"
+          done
+
           sudo apt-get update
-          sudo apt-get install -y openvpn
+          sudo apt-get install -y --no-install-recommends openvpn
           openvpn --version
 
       - name: Install dependencies
