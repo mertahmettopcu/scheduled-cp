@@ -1,0 +1,31 @@
+name: Send Dashboard Link
+
+on:
+  schedule:
+    # 00:00 Turkey time = 21:00 UTC
+    - cron: "0 21 * * *"
+  workflow_dispatch:
+
+jobs:
+  send-dashboard-link:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+
+    steps:
+      - name: Send dashboard link to Telegram
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DASHBOARD_URL: ${{ secrets.DASHBOARD_URL }}
+        run: |
+          if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ] || [ -z "$DASHBOARD_URL" ]; then
+            echo "Missing TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, or DASHBOARD_URL secret."
+            exit 1
+          fi
+
+          TEXT="📊 Güncel Dashboard:%0A${DASHBOARD_URL}"
+
+          curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d "chat_id=${TELEGRAM_CHAT_ID}" \
+            -d "text=${TEXT}" \
+            -d "disable_web_page_preview=true"
