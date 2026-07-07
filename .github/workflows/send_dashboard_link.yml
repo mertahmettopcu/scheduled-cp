@@ -15,17 +15,20 @@ jobs:
       - name: Send dashboard link to Telegram
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          DASHBOARD_URL: ${{ secrets.DASHBOARD_URL }}
+          TELEGRAM_CHAT_IDS: ${{ secrets.TELEGRAM_CHAT_IDS }}
+          STREAMLIT_APP_URL: ${{ secrets.STREAMLIT_APP_URL }}
         run: |
-          if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ] || [ -z "$DASHBOARD_URL" ]; then
-            echo "Missing TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, or DASHBOARD_URL secret."
+          if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_IDS" ] || [ -z "$STREAMLIT_APP_URL" ]; then
+            echo "Missing TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_IDS, or STREAMLIT_APP_URL secret."
             exit 1
           fi
 
-          TEXT="📊 Güncel Dashboard:%0A${DASHBOARD_URL}"
+          TEXT="📊 Güncel Dashboard:%0A${STREAMLIT_APP_URL}"
 
-          curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-            -d "chat_id=${TELEGRAM_CHAT_ID}" \
-            -d "text=${TEXT}" \
-            -d "disable_web_page_preview=true"
+          # Supports one chat id or multiple ids separated by comma or space.
+          for CHAT_ID in $(echo "$TELEGRAM_CHAT_IDS" | tr ',' ' '); do
+            curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -d "chat_id=${CHAT_ID}" \
+              -d "text=${TEXT}" \
+              -d "disable_web_page_preview=true"
+          done
